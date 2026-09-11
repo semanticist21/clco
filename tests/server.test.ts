@@ -393,6 +393,21 @@ describe("adapter server", () => {
     expect(body.input_tokens).toBeGreaterThan(50)
   })
 
+  test("copilotBaseUrl follows the endpoints.api from the token exchange", async () => {
+    const { copilotBaseUrl, setCopilotBase } = await import("../src/api")
+    expect(copilotBaseUrl()).toBe(process.env.CLCO_UPSTREAM!.replace(/\/$/, ""))
+    setCopilotBase("https://api.business.githubcopilot.com")
+    expect(copilotBaseUrl()).toBe(
+      process.env.CLCO_UPSTREAM!.replace(/\/$/, ""),
+    ) // mock mode keeps precedence
+    setCopilotBase(null)
+    delete process.env.CLCO_UPSTREAM
+    expect(copilotBaseUrl()).toBe("https://api.githubcopilot.com")
+    setCopilotBase("https://api.business.githubcopilot.com")
+    expect(copilotBaseUrl()).toBe("https://api.business.githubcopilot.com")
+    setCopilotBase(null)
+  })
+
   test("GET /v1/models proxies the upstream list for model discovery", async () => {
     const res = await fetch(`${adapter.url}/v1/models?limit=1000`, {
       headers: AUTH,

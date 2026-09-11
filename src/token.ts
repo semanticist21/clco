@@ -7,6 +7,7 @@ import {
   copilotRequestHeaders,
   githubRequestHeaders,
   isMockMode,
+  setCopilotBase,
 } from "./api"
 import { ensureGithubToken } from "./auth"
 
@@ -21,6 +22,9 @@ interface CopilotTokenResponse {
   token: string
   expires_at: number // epoch seconds
   refresh_in?: number
+  // Business/Enterprise accounts are served from a different host — official
+  // clients route to whatever this field names.
+  endpoints?: { api?: string }
 }
 
 let cached: { token: string; expiresAt: number } | null = null
@@ -70,6 +74,7 @@ async function fetchCopilotToken(): Promise<string> {
     throw new Error("Copilot 토큰 응답에 expires_at이 없습니다")
   }
   cached = { token: data.token, expiresAt: data.expires_at * 1000 }
+  setCopilotBase(data.endpoints?.api ?? null)
   return cached.token
 }
 
@@ -153,7 +158,7 @@ export async function discoverModels(): Promise<ModelMapping> {
     // fall through to fallbacks
   }
   console.error(
-    "[clco] Copilot /models 감지 실패 — 기본 슬러그 사용 (CLCO_OPUS/SONNET/HAIKU로 지정 가능)",
+    `[clco] Copilot /models 감지 실패 (${copilotBaseUrl()}) — 기본 슬러그 사용 (CLCO_OPUS/SONNET/HAIKU로 지정 가능)`,
   )
   return {
     opus: overrides.opus ?? FALLBACK_MODELS.opus,

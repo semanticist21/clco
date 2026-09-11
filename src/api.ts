@@ -24,8 +24,18 @@ export function isMockMode(): boolean {
   return mockUpstream() !== undefined
 }
 
+// Business/Enterprise accounts get a different API host in the Copilot
+// token response's endpoints.api field — official clients route there, so
+// clco does too (set by token.ts after each token exchange).
+let dynamicCopilotBase: string | null = null
+
+export function setCopilotBase(url: string | null): void {
+  dynamicCopilotBase =
+    url && url.startsWith("https://") ? url.replace(/\/$/, "") : null
+}
+
 export function copilotBaseUrl(): string {
-  return mockUpstream() ?? "https://api.githubcopilot.com"
+  return mockUpstream() ?? dynamicCopilotBase ?? "https://api.githubcopilot.com"
 }
 
 export function copilotRequestHeaders(
