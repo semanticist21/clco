@@ -392,10 +392,28 @@ async function main(): Promise<void> {
   process.exit(code)
 }
 
+// A TLS-inspecting corporate proxy is the usual cause here, and the fix is
+// to trust IT's CA — never to turn verification off.
+const TLS_HINT =
+  "\n사내 프록시가 TLS를 재서명하는 환경으로 보입니다. 다음 중 하나로 해결하세요:\n" +
+  "  1) NODE_USE_SYSTEM_CA=1 clco ...      (OS 신뢰저장소의 회사 CA 사용 — 권장)\n" +
+  "  2) NODE_EXTRA_CA_CERTS=<CA 번들.pem> clco ...\n" +
+  "  3) 회사 CA가 키체인에 없으면 IT에 요청\n" +
+  "TLS 검증을 끄는 방법은 쓰지 마세요 — GitHub 토큰이 그대로 노출됩니다."
+
+function isTlsTrustError(message: string): boolean {
+  return /self[- ]signed certificate|unable to (get|verify) local issuer|CERT_|certificate chain/i.test(
+    message,
+  )
+}
+
 // Only run when invoked as the CLI — tests import parseArgs from here.
 if (import.meta.main) {
   main().catch((err) => {
-    console.error(`오류: ${err instanceof Error ? err.message : String(err)}`)
+    const message = err instanceof Error ? err.message : String(err)
+    console.error(
+      `오류: ${message}${isTlsTrustError(message) ? TLS_HINT : ""}`,
+    )
     process.exit(1)
   })
 }

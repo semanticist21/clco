@@ -48,6 +48,7 @@ clco help
 - **Typo guard**: a mistyped subcommand (a bare word like `updaet`) fails fast with the full command list instead of silently starting a session. Dashed flags are always claude's.
 - **Auth**: the token is stored once at `~/.config/clco/auth.json` (mode 600). If it's ever rejected, `clco auth` re-authenticates.
 - **Debug**: `CLCO_DEBUG=1 clco` — adapter request logs go to `~/.config/clco/adapter.log`.
+- **Corporate networks**: behind a TLS-inspecting proxy, clco trusts the OS certificate store by default (`NODE_USE_SYSTEM_CA=1`), which is where IT installs the corporate CA — so it works without extra setup and without ever weakening verification. Opt out with `CLCO_NO_SYSTEM_CA=1`.
 
 ## Uninstall
 

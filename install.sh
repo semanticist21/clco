@@ -75,6 +75,14 @@ cat > "$BIN_DIR/clco" <<LAUNCHER
 # clco launcher (installed by install.sh)
 CLCO_APP_DIR="$CLCO_DIR"
 export CLCO_APP_DIR
+
+# Corporate TLS-inspecting proxies re-sign traffic with a CA that IT installs
+# in the OS trust store, so trust that store by default. This adds a trusted
+# issuer; it never disables verification. Opt out: CLCO_NO_SYSTEM_CA=1.
+if [ -z "\$CLCO_NO_SYSTEM_CA" ]; then
+  NODE_USE_SYSTEM_CA=1
+  export NODE_USE_SYSTEM_CA
+fi
 # bun strips a leading "--" before scripts see it — translate it into a
 # sentinel that cli.ts understands as "everything after is claude's".
 if [ "\$1" = "--" ]; then

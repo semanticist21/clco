@@ -175,6 +175,7 @@ export async function discoverModels(): Promise<ModelMapping> {
     haiku: env("CLCO_HAIKU"),
     fable: env("CLCO_FABLE"),
   }
+  let reason = ""
   try {
     const token = await getCopilotToken()
     const res = await fetch(`${copilotBaseUrl()}/models`, {
@@ -211,11 +212,14 @@ export async function discoverModels(): Promise<ModelMapping> {
         }
       }
     }
-  } catch {
-    // fall through to fallbacks
+  } catch (err) {
+    // Keep going with fallback slugs, but never hide why discovery failed —
+    // a TLS or auth problem here is the user's actual blocker.
+    reason = err instanceof Error ? err.message : String(err)
   }
   console.error(
-    `[clco] Copilot /models 감지 실패 (${copilotBaseUrl()}) — 기본 슬러그 사용 (CLCO_OPUS/SONNET/HAIKU로 지정 가능)`,
+    `[clco] Copilot /models 감지 실패 (${copilotBaseUrl()}${reason ? `: ${reason}` : ""})` +
+      ` — 기본 슬러그 사용 (CLCO_OPUS/SONNET/HAIKU로 지정 가능)`,
   )
   return {
     opus: overrides.opus ?? FALLBACK_MODELS.opus,
