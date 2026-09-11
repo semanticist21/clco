@@ -98,31 +98,50 @@ process.on("SIGTERM", () => {
 // Put every model the upstream offers into /model directly, with its own
 // label. Claude's gateway-discovery filter only keeps ids containing
 // "claude"/"anthropic", but a modelPicker lineup accepts any id verbatim.
-interface PickerEntry {
-  id: string
-  name?: string
+interface PickerOption {
+  model: string
+  label?: string
   description?: string
+  behavesAs: string
+}
+
+interface ModelPicker {
+  options: PickerOption[]
+}
+
+// Claude Code sizes an unfamiliar model by the built-in family it "behaves
+// as"; without it a custom row has no capability profile to fall back on.
+function behavesAs(id: string): string {
+  if (id.includes("opus")) return "opus"
+  if (id.includes("haiku")) return "haiku"
+  if (id.includes("fable")) return "fable"
+  return "sonnet"
 }
 
 // Claude Code's gateway discovery only keeps ids containing "claude" or
 // "anthropic", so every other Copilot model (luna, astra, grok, gemini…)
-// can only reach /model through an explicit modelPicker lineup.
-export function buildModelPickerFrom(list: UpstreamModel[]): PickerEntry[] | null {
+// can only reach /model through an explicit modelPicker lineup. The shape is
+// the one the binary itself validates against:
+//   { options: [{ model, label?, description?, behavesAs? }] }
+export function buildModelPickerFrom(list: UpstreamModel[]): ModelPicker | null {
   const usable = list.filter((m) => m.pickerEnabled !== false)
   if (usable.length === 0) return null
-  return usable.slice(0, 200).map((m) => {
-    const route = m.endpoints.includes("/v1/messages")
-      ? "native"
-      : m.endpoints.includes("/responses")
-        ? "responses"
-        : "chat"
-    const ctx = m.maxPromptTokens ?? m.maxContextTokens
-    return {
-      id: m.id,
-      ...(m.name && m.name !== m.id ? { name: m.name } : {}),
-      description: `Copilot · ${route}${ctx ? ` · ${Math.round(ctx / 1000)}k` : ""}`,
-    }
-  })
+  return {
+    options: usable.slice(0, 200).map((m) => {
+      const route = m.endpoints.includes("/v1/messages")
+        ? "native"
+        : m.endpoints.includes("/responses")
+          ? "responses"
+          : "chat"
+      const ctx = m.maxPromptTokens ?? m.maxContextTokens
+      return {
+        model: m.id,
+        ...(m.name && m.name !== m.id ? { label: m.name } : {}),
+        description: `Copilot · ${route}${ctx ? ` · ${Math.round(ctx / 1000)}k` : ""}`,
+        behavesAs: behavesAs(m.id),
+      }
+    }),
+  }
 }
 
 function buildModelPicker() {
