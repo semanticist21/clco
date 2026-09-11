@@ -323,10 +323,15 @@ async function main(): Promise<void> {
   const list = upstreamModels()
 
   let defaultModel: string | undefined
-  // Bare interactive launch only — args (e.g. -p) or non-TTY skip the picker.
+  // Ask whenever a human is actually there. Print mode (-p) and non-TTY runs
+  // must stay unattended, but ordinary flags like --dangerously-skip-permissions
+  // or --chrome should not cost you the model choice.
+  const printMode = args.claudeArgs.some(
+    (a) => a === "-p" || a === "--print" || a.startsWith("--print="),
+  )
   if (
     args.command === "run" &&
-    args.claudeArgs.length === 0 &&
+    !printMode &&
     interactive &&
     !process.env.CLCO_NO_SELECT &&
     list.length > 0

@@ -1,5 +1,14 @@
 import { describe, expect, test } from "bun:test"
-import { buildModelPickerFrom, buildSettingsEnv } from "../src/spawn"
+import { existsSync } from "node:fs"
+import { readFile, rm, writeFile } from "node:fs/promises"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
+import {
+  buildModelPickerFrom,
+  buildSettingsEnv,
+  restoreUserModel,
+  snapshotUserModel,
+} from "../src/spawn"
 
 describe("buildModelPickerFrom", () => {
   const model = (over: Record<string, unknown>) => ({
@@ -87,5 +96,46 @@ describe("buildSettingsEnv", () => {
     const env = buildSettingsEnv("http://127.0.0.1:1", models, "mystery", null)
     expect(env.CLAUDE_CODE_AUTO_COMPACT_WINDOW).toBe("160000")
     expect(env.CLAUDE_CODE_DISABLE_THINKING).toBe("1")
+  })
+})
+
+describe("user settings protection", () => {
+  // Picking a model with Enter in /model writes it to the user's own
+  // settings; a Copilot slug must never survive into plain `claude`.
+  const tmp = () => join(tmpdir(), `clco-settings-${crypto.randomUUID()}.json`)
+
+  test("restores a model the session overwrote", async () => {
+    const path = tmp()
+    await writeFile(path, JSON.stringify({ model: "opus", other: 1 }, null, 2))
+    const before = await snapshotUserModel(path)
+    await writeFile(path, JSON.stringify({ model: "gpt-5.6-luna", other: 1 }))
+    expect(await restoreUserModel(path, before)).toBe(true)
+    const after = JSON.parse(await readFile(path, "utf8"))
+    expect(after).toEqual({ model: "opus", other: 1 })
+    await rm(path)
+  })
+
+  test("drops a model key the session introduced", async () => {
+    const path = tmp()
+    await writeFile(path, JSON.stringify({ other: 1 }))
+    const before = await snapshotUserModel(path)
+    await writeFile(path, JSON.stringify({ model: "gpt-6-astra", other: 1 }))
+    expect(await restoreUserModel(path, before)).toBe(true)
+    expect(JSON.parse(await readFile(path, "utf8"))).toEqual({ other: 1 })
+    await rm(path)
+  })
+
+  test("leaves an untouched file alone, and never creates one", async () => {
+    const path = tmp()
+    await writeFile(path, JSON.stringify({ model: "opus" }))
+    const before = await snapshotUserModel(path)
+    expect(await restoreUserModel(path, before)).toBe(false)
+    await rm(path)
+
+    const missing = tmp()
+    const none = await snapshotUserModel(missing)
+    expect(none.existed).toBe(false)
+    expect(await restoreUserModel(missing, none)).toBe(false)
+    expect(existsSync(missing)).toBe(false)
   })
 })

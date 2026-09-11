@@ -4,7 +4,9 @@
 // block cannot swallow it) without touching any config file. The same env is
 // also merged into the child process environment.
 
+import { readFile, writeFile } from "node:fs/promises"
 import { homedir } from "node:os"
+import { join } from "node:path"
 import {
   modelInfo,
   upstreamModels,
@@ -54,6 +56,49 @@ export function buildSettingsEnv(
     // Slow upstream: never abort a stream for idling.
     API_FORCE_IDLE_TIMEOUT: "0",
     API_TIMEOUT_MS: "3000000",
+  }
+}
+
+// Picking a model with Enter in /model makes Claude Code write it to the
+// user's own settings ("becomes the default for new sessions"), which would
+// leak a Copilot slug into plain `claude` runs. clco snapshots that one key
+// and puts it back when the session ends.
+const USER_SETTINGS = join(homedir(), ".claude", "settings.json")
+
+interface ModelSnapshot {
+  existed: boolean
+  model?: unknown
+}
+
+export async function snapshotUserModel(path: string): Promise<ModelSnapshot> {
+  try {
+    const parsed = JSON.parse(await readFile(path, "utf8")) as Record<string, unknown>
+    return { existed: true, model: parsed.model }
+  } catch {
+    return { existed: false }
+  }
+}
+
+/** Returns true when a changed model key had to be put back. */
+export async function restoreUserModel(
+  path: string,
+  before: ModelSnapshot,
+): Promise<boolean> {
+  if (!before.existed) return false
+  let parsed: Record<string, unknown>
+  try {
+    parsed = JSON.parse(await readFile(path, "utf8")) as Record<string, unknown>
+  } catch {
+    return false
+  }
+  if (parsed.model === before.model) return false
+  if (before.model === undefined) delete parsed.model
+  else parsed.model = before.model
+  try {
+    await writeFile(path, JSON.stringify(parsed, null, 2) + "\n")
+    return true
+  } catch {
+    return false
   }
 }
 
@@ -155,6 +200,7 @@ export async function runClaude(opts: {
   claudeArgs: string[]
 }): Promise<number> {
   const claude = await resolveClaude()
+  const modelBefore = await snapshotUserModel(USER_SETTINGS)
   const env = buildSettingsEnv(opts.baseUrl, opts.models, opts.defaultModel)
   const picker = buildModelPicker()
   const settings = JSON.stringify({
@@ -185,6 +231,11 @@ export async function runClaude(opts: {
       clearTimeout(escalateTimer)
       escalateTimer = undefined
     }
+  }
+  if (await restoreUserModel(USER_SETTINGS, modelBefore)) {
+    console.error(
+      "[clco] /model 선택은 clco 세션에만 적용됩니다 — ~/.claude/settings.json의 model을 되돌렸습니다",
+    )
   }
   return code ?? 0
 }
