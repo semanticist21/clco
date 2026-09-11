@@ -4,8 +4,10 @@
 // claude launched with injected settings.
 
 import * as p from "@clack/prompts"
+import { existsSync } from "node:fs"
 import { appendFile } from "node:fs/promises"
 import { homedir } from "node:os"
+import { join } from "node:path"
 import { clearAuth, loadPrefs, savePrefs } from "./config"
 import { ensureGithubToken, runDeviceFlow } from "./auth"
 import { isMockMode } from "./api"
@@ -26,6 +28,8 @@ const HELP = `clco — GitHub Copilot 구독으로 Claude Code 실행
       GitHub device flow (재)인증 — 계정 전환도 이걸로
   clco logout
       저장된 GitHub 토큰 삭제
+  clco update
+      설치된 clco를 저장소 최신 버전으로 갱신 (git pull + 의존성)
   clco help
 
 환경변수:
@@ -36,7 +40,7 @@ const HELP = `clco — GitHub Copilot 구독으로 Claude Code 실행
 `
 
 interface Args {
-  command: "run" | "serve" | "auth" | "login" | "logout"
+  command: "run" | "serve" | "auth" | "login" | "logout" | "update"
   port?: number
   claudeArgs: string[]
 }
@@ -55,7 +59,8 @@ function parseArgs(argv: string[]): Args {
   while (i < leading.length) {
     const arg = leading[i]
     if (
-      (arg === "serve" || arg === "auth" || arg === "login" || arg === "logout") &&
+      (arg === "serve" || arg === "auth" || arg === "login" ||
+        arg === "logout" || arg === "update") &&
       command === "run"
     ) {
       command = arg
@@ -105,6 +110,46 @@ async function step<T>(name: string, fn: () => Promise<T>): Promise<T> {
   }
 }
 
+// Where the running installation lives: explicit env from the installed
+// launcher, then the standard install location, then a dev checkout.
+function appDir(): string | null {
+  if (process.env.CLCO_APP_DIR) return process.env.CLCO_APP_DIR
+  const installed = join(homedir(), ".local", "share", "clco")
+  if (existsSync(join(installed, ".git"))) return installed
+  const devRoot = join(import.meta.dir, "..")
+  if (existsSync(join(devRoot, ".git"))) return devRoot
+  return null
+}
+
+async function runUpdate(): Promise<void> {
+  const dir = appDir()
+  if (!dir) {
+    throw new Error(
+      "업데이트할 설치를 찾지 못했습니다 (설치 디렉토리 또는 git 저장소 필요)",
+    )
+  }
+  console.error(`… 업데이트: ${dir}`)
+  const pull = Bun.spawnSync(["git", "-C", dir, "pull", "--ff-only"], {
+    stdout: "pipe",
+    stderr: "pipe",
+  })
+  if (pull.exitCode !== 0) {
+    throw new Error(
+      `git pull 실패: ${pull.stderr.toString().trim() || pull.stdout.toString().trim()}`,
+    )
+  }
+  const inst = Bun.spawnSync(["bun", "install"], {
+    cwd: dir,
+    stdout: "pipe",
+    stderr: "pipe",
+  })
+  if (inst.exitCode !== 0) throw new Error("bun install 실패")
+  const head = Bun.spawnSync(["git", "-C", dir, "rev-parse", "--short", "HEAD"], {
+    stdout: "pipe",
+  })
+  console.error(`✓ 업데이트 완료 (${head.stdout.toString().trim()}) — 다음 실행부터 적용`)
+}
+
 async function main(): Promise<void> {
   const argv = process.argv.slice(2)
   if (["help", "--help", "-h"].includes(argv[0] ?? "")) {
@@ -112,6 +157,11 @@ async function main(): Promise<void> {
     return
   }
   const args = parseArgs(argv)
+
+  if (args.command === "update") {
+    await runUpdate()
+    return
+  }
 
   if (args.command === "logout") {
     await clearAuth()
