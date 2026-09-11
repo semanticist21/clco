@@ -2,6 +2,19 @@
 // The editor identity mirrors an official Copilot Chat client, which is what
 // the Copilot backend expects on api.githubcopilot.com.
 
+import { caBundle } from "./tls"
+
+// Every outbound HTTPS request clco makes goes through here so a corporate CA
+// configured via CLCO_CA_BUNDLE applies uniformly. Per-request `tls.ca` needs
+// no process-level env, so it works regardless of how clco was launched.
+export function copilotFetch(
+  url: string,
+  init?: RequestInit,
+): Promise<Response> {
+  const ca = caBundle()
+  return fetch(url, ca ? { ...init, tls: { ca } } : init)
+}
+
 export const GITHUB_BASE_URL = "https://github.com"
 export const GITHUB_API_BASE_URL = "https://api.github.com"
 export const GITHUB_CLIENT_ID = "Iv1.b507a08c87ecfe98"

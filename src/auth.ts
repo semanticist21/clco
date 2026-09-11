@@ -7,6 +7,7 @@ import {
   GITHUB_APP_SCOPES,
   GITHUB_BASE_URL,
   GITHUB_CLIENT_ID,
+  copilotFetch,
   githubRequestHeaders,
   isMockMode,
 } from "./api"
@@ -34,7 +35,7 @@ export async function ensureGithubToken(): Promise<GithubIdentity> {
 }
 
 export async function runDeviceFlow(): Promise<{ token: string; login?: string }> {
-  const res = await fetch(`${GITHUB_BASE_URL}/login/device/code`, {
+  const res = await copilotFetch(`${GITHUB_BASE_URL}/login/device/code`, {
     method: "POST",
     headers: { "content-type": "application/json", accept: "application/json" },
     body: JSON.stringify({
@@ -76,7 +77,7 @@ export async function runDeviceFlow(): Promise<{ token: string; login?: string }
       error_description?: string
     }
     try {
-      const poll = await fetch(`${GITHUB_BASE_URL}/login/oauth/access_token`, {
+      const poll = await copilotFetch(`${GITHUB_BASE_URL}/login/oauth/access_token`, {
         method: "POST",
         headers: {
           "content-type": "application/json",
@@ -107,7 +108,7 @@ export async function runDeviceFlow(): Promise<{ token: string; login?: string }
       const token = body.access_token
       let login: string | undefined
       try {
-        const user = await fetch(`${GITHUB_API_BASE_URL}/user`, {
+        const user = await copilotFetch(`${GITHUB_API_BASE_URL}/user`, {
           headers: githubRequestHeaders(token),
         })
         if (user.ok) login = ((await user.json()) as { login?: string }).login

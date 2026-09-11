@@ -3,7 +3,9 @@ import { existsSync } from "node:fs"
 import { readFile, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
+import { CATALOG_MODEL_IDS } from "../src/catalog"
 import {
+  buildModelOverridesFrom,
   buildModelPickerFrom,
   buildSettingsEnv,
   restoreUserModel,
@@ -14,9 +16,20 @@ describe("buildModelPickerFrom", () => {
   const model = (over: Record<string, unknown>) => ({
     id: "x",
     name: "x",
-    endpoints: [] as string[],
+    endpoints: ["/chat/completions"] as string[],
     efforts: null,
     ...over,
+  })
+
+  // Every model GitHub currently returns carries model_picker_enabled:false,
+  // so honouring that field emptied the lineup completely. The lineup must
+  // survive it.
+  test("a lineup where the upstream hides every model still renders", () => {
+    const picker = buildModelPickerFrom([
+      model({ id: "gpt-5.6-luna", pickerEnabled: false, maxPromptTokens: 200000 }),
+      model({ id: "claude-opus-5", pickerEnabled: false, maxPromptTokens: 200000 }),
+    ])!
+    expect(picker.options).toHaveLength(2)
   })
 
   test("emits the shape the claude binary validates against", () => {
@@ -34,32 +47,105 @@ describe("buildModelPickerFrom", () => {
         name: "claude-opus-5",
         endpoints: ["/v1/messages", "/chat/completions"],
         maxPromptTokens: 200000,
+        efforts: ["low", "high"],
       }),
     ])!
-    // { options: [{ model, label?, description?, behavesAs? }] } — a flat
-    // array is rejected outright by Claude Code.
     expect(Array.isArray(picker.options)).toBe(true)
-    // Non-Claude ids must survive: gateway discovery drops them.
+    // Native rows sort ahead of the rest.
     expect(picker.options[0]).toEqual({
-      model: "gpt-5.6-luna",
-      label: "Luna 5.6",
-      description: "Copilot · responses · 328k",
-      behavesAs: "sonnet",
-    })
-    // No label when it would just repeat the id; family inferred from the id.
-    expect(picker.options[1]).toEqual({
       model: "claude-opus-5",
       description: "Copilot · native · 200k",
-      behavesAs: "opus",
+    })
+    // A non-catalog id needs behavesAs or claude silently declines the row,
+    // and the target must be a real catalog id — never a family alias.
+    expect(picker.options[1]).toEqual({
+      model: "gpt-5.6-luna[1m]",
+      label: "Luna 5.6",
+      description: "Copilot · responses · 328k · effort 없음",
+      behavesAs: "claude-opus-5",
     })
   })
 
-  test("skips models the upstream hides and caps the lineup", () => {
+  test("dot-form Claude slugs are advertised in catalog form, unborrowed", () => {
+    const picker = buildModelPickerFrom([
+      model({ id: "claude-haiku-4.5", maxPromptTokens: 128000 }),
+      model({ id: "claude-opus-4.8-fast", maxPromptTokens: 200000 }),
+    ])!
+    const haiku = picker.options.find((o) => o.model.startsWith("claude-haiku"))!
+    expect(haiku.model).toBe("claude-haiku-4-5")
+    expect(haiku.behavesAs).toBeUndefined()
+    // No catalog twin for the -fast variant, so it has to borrow one.
+    const fast = picker.options.find((o) => o.model.includes("fast"))!
+    expect(fast.model).toBe("claude-opus-4.8-fast")
+    expect(fast.behavesAs).toBe("claude-haiku-4-5")
+  })
+
+  test("every behavesAs target is a real catalog id", () => {
+    const picker = buildModelPickerFrom([
+      model({ id: "claude-sonnet-5", endpoints: ["/v1/messages"] }),
+      model({ id: "gpt-6-astra", endpoints: ["/responses"] }),
+      model({ id: "kimi-k3" }),
+      model({ id: "gemini-3.8-flash" }),
+    ])!
+    for (const o of picker.options) {
+      if (o.behavesAs) expect(CATALOG_MODEL_IDS.has(o.behavesAs)).toBe(true)
+    }
+  })
+
+  test("[1m] is claimed only above the default ceiling", () => {
+    const picker = buildModelPickerFrom([
+      model({ id: "small", maxPromptTokens: 12288 }),
+      model({ id: "exact", maxPromptTokens: 200000 }),
+      model({ id: "big", maxPromptTokens: 917504 }),
+    ])!
+    const by = (id: string) => picker.options.find((o) => o.model.startsWith(id))!
+    expect(by("small").model).toBe("small")
+    expect(by("exact").model).toBe("exact")
+    expect(by("big").model).toBe("big[1m]")
+  })
+
+  test("models that cannot hold a conversation are excluded", () => {
     expect(
-      buildModelPickerFrom([model({ id: "hidden", pickerEnabled: false })]),
+      buildModelPickerFrom([
+        model({ id: "text-embedding-3-small", type: "embeddings", endpoints: [] }),
+      ]),
     ).toBeNull()
+  })
+
+  // Older Copilot entries declare neither capabilities.type nor
+  // supported_endpoints; Copilot serves them over /chat/completions and so
+  // does the adapter, so absent metadata must not drop them.
+  test("entries with no declared capability metadata are still offered", () => {
+    const picker = buildModelPickerFrom([
+      model({ id: "gpt-4o", type: undefined, endpoints: [] }),
+    ])!
+    expect(picker.options).toHaveLength(1)
+  })
+
+  // Replacing the built-in lineup while offering nothing leaves /model empty.
+  test("replaceBuiltInOptions rides only on a non-empty lineup", () => {
+    expect(buildModelPickerFrom([model({ id: "a" })])!.replaceBuiltInOptions).toBe(
+      true,
+    )
+    expect(
+      buildModelPickerFrom([model({ type: "embeddings", endpoints: [] })]),
+    ).toBeNull()
+  })
+
+  test("caps the lineup", () => {
     const big = Array.from({ length: 250 }, (_, i) => model({ id: `m-${i}` }))
     expect(buildModelPickerFrom(big)!.options).toHaveLength(200)
+  })
+})
+
+describe("buildModelOverridesFrom", () => {
+  test("maps advertised catalog ids back to the upstream slug", () => {
+    expect(
+      buildModelOverridesFrom([
+        { id: "claude-haiku-4.5", name: "", endpoints: [], efforts: null },
+        { id: "claude-opus-5", name: "", endpoints: [], efforts: null },
+      ]),
+    ).toEqual({ "claude-haiku-4-5": "claude-haiku-4.5" })
   })
 })
 

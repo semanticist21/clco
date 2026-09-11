@@ -226,11 +226,26 @@ export interface StreamEventData {
 // Request direction: Anthropic -> OpenAI
 // ---------------------------------------------------------------------------
 
+// Ids clco advertised to Claude Code, mapped back to the upstream slug they
+// stand for. Populated from the live /models response after discovery, so the
+// table always matches what the picker actually offered. Kept here rather
+// than read from token.ts to avoid a cycle.
+let modelAliases = new Map<string, string>()
+
+export function setModelAliases(aliases: Map<string, string>): void {
+  modelAliases = aliases
+}
+
 // Copilot slugs are dot-form ("claude-sonnet-4.5"). Claude Code may echo back
-// dash-form, a date suffix, or a bracket suffix like [1m]; normalize all.
+// an advertised alias, dash-form, a date suffix, or a bracket suffix like
+// [1m]; normalize all. The alias table wins over the pattern rules because it
+// is derived from the upstream's own list — the patterns are only a fallback
+// for ids discovery never saw (and they miss families like fable entirely).
 export function normalizeModel(model: string): string {
   let m = model.replace(/\[[^\]]*\]$/, "")
   m = m.replace(/-\d{8}$/, "")
+  const alias = modelAliases.get(m)
+  if (alias) return alias
   m = m.replace(
     /^claude-(opus|sonnet|haiku)-(\d+)-(\d+)$/,
     "claude-$1-$2.$3",

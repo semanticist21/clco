@@ -1,4 +1,7 @@
+
 import { describe, expect, test } from "bun:test"
+import { advertisedId } from "../src/catalog"
+import { setModelAliases } from "../src/translate"
 import {
   StreamTranslator,
   estimateTokens,
@@ -710,5 +713,39 @@ describe("estimateTokens", () => {
     })
     expect(small).toBeGreaterThan(0)
     expect(large).toBeGreaterThan(small * 10)
+  })
+})
+
+describe("model alias table", () => {
+  test("advertised ids resolve to their upstream slug, ahead of the patterns", () => {
+    setModelAliases(new Map([["claude-fable-5-1", "claude-fable-5.1"]]))
+    // The pattern rules never handled the fable family, so without the table
+    // this slug reached Copilot verbatim and 400'd.
+    expect(normalizeModel("claude-fable-5-1")).toBe("claude-fable-5.1")
+    // Suffixes are stripped before the lookup.
+    expect(normalizeModel("claude-fable-5-1[1m]")).toBe("claude-fable-5.1")
+    setModelAliases(new Map())
+  })
+
+  test("falls back to the pattern rules for ids discovery never saw", () => {
+    setModelAliases(new Map())
+    expect(normalizeModel("claude-haiku-4-5")).toBe("claude-haiku-4.5")
+    expect(normalizeModel("claude-sonnet-4-5-20250929")).toBe("claude-sonnet-4.5")
+  })
+
+  test("an advertised id never collides with a real upstream id", () => {
+    const upstream = [
+      "claude-haiku-4.5",
+      "claude-opus-4.8",
+      "claude-opus-4.8-fast",
+      "claude-sonnet-5",
+      "gpt-6-astra",
+    ]
+    for (const id of upstream) {
+      const advertised = advertisedId(id)
+      if (advertised && advertised !== id) {
+        expect(upstream).not.toContain(advertised)
+      }
+    }
   })
 })

@@ -1,7 +1,13 @@
 // Local Anthropic-compatible adapter server. Claude Code talks to this; it
 // translates and forwards to GitHub Copilot.
 
-import { copilotBaseUrl, copilotRequestHeaders, isMockMode } from "./api"
+import {
+  copilotBaseUrl,
+  copilotFetch,
+  copilotRequestHeaders,
+  isMockMode,
+} from "./api"
+import { TLS_HINT, isTlsTrustError } from "./tls"
 import {
   getCopilotToken,
   invalidateCopilotToken,
@@ -49,6 +55,26 @@ const MAX_BODY_BYTES = 64 * 1024 * 1024
 
 const QUOTA_GUIDANCE =
   "Copilot 월간 premium quota 초과 또는 구독 없음 — github.com/settings/copilot에서 확인하세요"
+
+// clco appends [1m] to picker rows whose real window exceeds the default
+// ceiling, which makes Claude Code request the 1M-context beta. Forward that
+// only to a model that genuinely has the window — Copilot rejects the header
+// otherwise, and the [1m] suffix is the only per-row window channel the
+// picker schema offers, so we cannot simply stop using it.
+export function sanitizeBeta(
+  beta: string | undefined,
+  model: string,
+): string | undefined {
+  if (!beta) return beta
+  const window =
+    modelInfo(model)?.maxPromptTokens ?? modelInfo(model)?.maxContextTokens
+  if ((window ?? 0) >= 1_000_000) return beta
+  const kept = beta
+    .split(",")
+    .map((v) => v.trim())
+    .filter((v) => v && !v.startsWith("context-1m"))
+  return kept.length > 0 ? kept.join(",") : undefined
+}
 
 function timestamp(): string {
   return new Date().toTimeString().slice(0, 8)
@@ -184,9 +210,10 @@ async function copilotChat(
       // Forward the protocol headers verbatim; the upstream needs them to
       // honour the same betas Claude Code asked for.
       if (native.anthropicVersion) headers["anthropic-version"] = native.anthropicVersion
-      if (native.anthropicBeta) headers["anthropic-beta"] = native.anthropicBeta
+      const beta = sanitizeBeta(native.anthropicBeta, payload.model)
+      if (beta) headers["anthropic-beta"] = beta
     }
-    const res = await fetch(`${upstreamBase}${endpoint}`, {
+    const res = await copilotFetch(`${upstreamBase}${endpoint}`, {
       method: "POST",
       headers,
       body: useNative
@@ -402,7 +429,27 @@ async function handleMessages(
     `[${timestamp()}] POST /v1/messages model=${payload.model} stream=${stream}`,
   )
 
-  const allowedEfforts = modelInfo(normalizeModel(payload.model))?.efforts ?? null
+  const info = modelInfo(normalizeModel(payload.model))
+  const allowedEfforts = info?.efforts ?? null
+  // The session's auto-compact budget is fixed at launch, so switching to a
+  // smaller model mid-session lets the conversation sail past its real limit
+  // and come back as an opaque upstream 400. This is the only place that
+  // knows which model is actually in play, so the check belongs here.
+  const limit = info?.maxPromptTokens ?? info?.maxContextTokens
+  if (limit) {
+    const estimate = estimateTokens(payload)
+    if (estimate > limit * 0.98) {
+      logLine(
+        `[${timestamp()}]   -> 400 over budget (~${estimate} > ${limit})`,
+      )
+      return anthropicError(
+        400,
+        `${payload.model}의 입력 한도(${limit.toLocaleString()} 토큰)를 넘었습니다 ` +
+          `(현재 약 ${estimate.toLocaleString()}). /compact 하거나 ` +
+          `/model에서 컨텍스트가 더 큰 모델로 바꾸세요.`,
+      )
+    }
+  }
   const upstreamPayload = translateRequest(payload, allowedEfforts)
   // Only the model name is rewritten for the native path; every other field
   // (thinking, cache_control, output_config, tools) rides through as sent.
@@ -425,7 +472,15 @@ async function handleMessages(
       allowedEfforts,
     )
   } catch (err) {
-    return anthropicError(502, `upstream request failed: ${String(err)}`)
+    // This is the only place a TLS failure can reach the user: it renders as
+    // an API error inside claude's UI, so the remedy has to travel with it.
+    const detail = String(err)
+    logLine(`[${timestamp()}]   -> upstream request failed: ${detail}`)
+    return anthropicError(
+      502,
+      `upstream request failed: ${detail}` +
+        (isTlsTrustError(detail) ? TLS_HINT : ""),
+    )
   }
   if (!result.ok) {
     logLine(`[${timestamp()}]   -> HTTP ${result.status} (${Date.now() - started}ms)`)

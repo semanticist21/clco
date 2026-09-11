@@ -5,15 +5,27 @@
 
 import * as p from "@clack/prompts"
 import { existsSync, mkdirSync } from "node:fs"
-import { appendFile } from "node:fs/promises"
+import { appendFile, readFile } from "node:fs/promises"
 import { homedir } from "node:os"
 import { join } from "node:path"
 import { clearAuth, loadPrefs, savePrefs, saveAuth } from "./config"
 import { ensureGithubToken, runDeviceFlow } from "./auth"
-import { GITHUB_API_BASE_URL, githubRequestHeaders, isMockMode } from "./api"
-import { copilotTokenFacts, discoverModels, upstreamModels } from "./token"
+import {
+  GITHUB_API_BASE_URL,
+  copilotFetch,
+  githubRequestHeaders,
+  isMockMode,
+} from "./api"
+import {
+  copilotTokenFacts,
+  discoverModels,
+  takeDiscoverySoftFailure,
+  upstreamModels,
+} from "./token"
 import { setAdapterLogSink, startServer } from "./server"
-import { resolveClaude, runClaude } from "./spawn"
+import { buildModelPickerFrom, resolveClaude, runClaude } from "./spawn"
+import { TLS_HINT, isTlsTrustError } from "./tls"
+import { normalizeModel } from "./translate"
 
 const HELP = `clco — GitHub Copilot 구독으로 Claude Code 실행
 
@@ -66,11 +78,9 @@ claude 인자는 그대로 전달됩니다:  clco -p "질문"  /  clco --chrome 
 
 export function parseArgs(rawArgv: string[]): Args {
   // The launcher replaces a leading "--" with this sentinel because bun
-  // strips the bare separator before scripts ever see it.
-  const argv =
-    rawArgv[0] === "__clco_passthrough__"
-      ? rawArgv
-      : rawArgv
+  // strips the bare separator before scripts ever see it; it is consumed in
+  // the scan below.
+  const argv = rawArgv
   const sep = argv.indexOf("--")
   const leading = sep === -1 ? argv : argv.slice(0, sep)
   const trailing = sep === -1 ? [] : argv.slice(sep + 1)
@@ -187,6 +197,21 @@ async function runUpdate(): Promise<void> {
     stderr: "pipe",
   })
   if (inst.exitCode !== 0) throw new Error("bun install 실패")
+  // Refresh the launcher too. It used to be baked once by install.sh, so an
+  // existing install never picked up launcher changes no matter how often it
+  // updated.
+  const binDir = join(homedir(), ".local", "bin")
+  const launcher = Bun.spawnSync(
+    ["bash", join(dir, "scripts", "write-launcher.sh"), dir, binDir],
+    { stdout: "pipe", stderr: "pipe" },
+  )
+  if (launcher.exitCode === 0) {
+    console.error(`… 런처 갱신: ${join(binDir, "clco")}`)
+  } else {
+    console.error(
+      `⚠ 런처 갱신 실패 — install.sh를 다시 실행하세요 (${launcher.stderr.toString().trim()})`,
+    )
+  }
   const head = Bun.spawnSync(["git", "-C", dir, "rev-parse", "--short", "HEAD"], {
     stdout: "pipe",
   })
@@ -204,7 +229,7 @@ async function runStatus(): Promise<void> {
   let lookupNote = ""
   if (!login && !isMockMode()) {
     try {
-      const res = await fetch(`${GITHUB_API_BASE_URL}/user`, {
+      const res = await copilotFetch(`${GITHUB_API_BASE_URL}/user`, {
         headers: githubRequestHeaders(identity.token),
         signal: AbortSignal.timeout(10_000),
       })
@@ -228,6 +253,8 @@ async function runStatus(): Promise<void> {
   const facts = await copilotTokenFacts().catch(() => ({}) as { sku?: string })
   if (facts.sku) console.log(`플랜: ${facts.sku}`)
   await discoverModels()
+  const discoveryNote = takeDiscoverySoftFailure()
+  if (discoveryNote) console.error(discoveryNote)
   const models = upstreamModels()
   if (models.length === 0) {
     console.log("모델 목록을 가져오지 못했습니다 (네트워크 또는 구독 확인)")
@@ -239,21 +266,78 @@ async function runStatus(): Promise<void> {
       : m.endpoints.includes("/responses")
         ? "responses"
         : "chat"
+  // `model_picker_enabled` is not filtered here: GitHub returns false for
+  // every model, so honouring it emptied this table (and /model) entirely.
+  const picker = buildModelPickerFrom(models)
+  const offered = new Map(
+    (picker?.options ?? []).map((o) => [normalizeModel(o.model), o] as const),
+  )
   console.log(
-    `\n${"모델".padEnd(24)} ${"경로".padEnd(10)} ${"정책".padEnd(10)} ${"컨텍스트".padEnd(10)} effort`,
+    `\n${"모델".padEnd(26)} ${"/model 표기".padEnd(38)} ${"경로".padEnd(10)} ` +
+      `${"정책".padEnd(10)} ${"컨텍스트".padEnd(10)} effort`,
   )
   for (const m of models) {
-    if (m.pickerEnabled === false) continue
+    const row = offered.get(m.id)
+    const shown = row
+      ? row.model + (row.behavesAs ? ` (→${row.behavesAs})` : "")
+      : "-"
     const ctx = m.maxPromptTokens ?? m.maxContextTokens
     console.log(
-      `${m.id.padEnd(24)} ${route(m).padEnd(10)} ${(m.policyState ?? "?").padEnd(10)} ` +
+      `${m.id.padEnd(26)} ${shown.padEnd(38)} ${route(m).padEnd(10)} ` +
+        `${(m.policyState ?? "?").padEnd(10)} ` +
         `${String(ctx ?? "?").padEnd(10)} ${m.efforts ? m.efforts.join(",") : "-"}`,
     )
   }
   console.log(
+    `\n/model 행 ${picker?.options.length ?? 0}개 / 업스트림 ${models.length}개`,
+  )
+  await reportClaudeInstallNotes()
+  console.log(
     "\nquota는 실제 요청 시점에만 확인됩니다 (Copilot에 사전 조회 API가 없음).\n" +
       "소진 시 402와 함께 안내가 표시됩니다.",
   )
+}
+
+// Things in the user's own claude install that change what clco's lineup
+// does, plus leftovers older clco versions wrote there.
+/** Matches LAUNCHER_VERSION in scripts/write-launcher.sh. */
+const LAUNCHER_VERSION = 2
+
+function reportStaleLauncher(): void {
+  const running = Number(process.env.CLCO_LAUNCHER_VERSION ?? "0")
+  if (running >= LAUNCHER_VERSION) return
+  console.log(
+    `\n참고: ~/.local/bin/clco 런처가 낡았습니다 (v${running || "?"} < v${LAUNCHER_VERSION}).` +
+      " `clco update` 또는 install.sh 재실행으로 갱신하세요.",
+  )
+}
+
+async function reportClaudeInstallNotes(): Promise<void> {
+  reportStaleLauncher()
+  const home = homedir()
+  const stale = join(home, ".claude", "cache", "gateway-models.json")
+  if (await Bun.file(stale).exists()) {
+    console.log(
+      `\n참고: ${stale} 는 이전 버전 clco가 남긴 것입니다 — 지워도 됩니다.`,
+    )
+  }
+  try {
+    const raw = await readFile(join(home, ".claude", "settings.json"), "utf8")
+    const parsed = JSON.parse(raw) as Record<string, unknown>
+    // Both outrank or filter what --settings injects.
+    if (parsed.availableModels) {
+      console.log(
+        "경고: ~/.claude/settings.json의 availableModels가 clco의 /model 행을 걸러냅니다.",
+      )
+    }
+    if (parsed.modelPicker) {
+      console.log(
+        "참고: ~/.claude/settings.json에 modelPicker가 있습니다 — clco의 --settings가 우선하며 병합되지 않습니다.",
+      )
+    }
+  } catch {
+    // no settings file, or not strict JSON — nothing to warn about
+  }
 }
 
 async function main(): Promise<void> {
@@ -338,6 +422,10 @@ async function main(): Promise<void> {
   const models = await step("Copilot 토큰·모델 목록 조회", () =>
     discoverModels(),
   )
+  // Printed here, not inside discoverModels: step() runs a spinner that would
+  // paint over anything written while it is active.
+  const discoveryNote = takeDiscoverySoftFailure()
+  if (discoveryNote) console.error(discoveryNote)
   const list = upstreamModels()
 
   let defaultModel: string | undefined
@@ -413,21 +501,6 @@ async function main(): Promise<void> {
   })
   server.stop()
   process.exit(code)
-}
-
-// A TLS-inspecting corporate proxy is the usual cause here, and the fix is
-// to trust IT's CA — never to turn verification off.
-const TLS_HINT =
-  "\n사내 프록시가 TLS를 재서명하는 환경으로 보입니다. 다음 중 하나로 해결하세요:\n" +
-  "  1) NODE_USE_SYSTEM_CA=1 clco ...      (OS 신뢰저장소의 회사 CA 사용 — 권장)\n" +
-  "  2) NODE_EXTRA_CA_CERTS=<CA 번들.pem> clco ...\n" +
-  "  3) 회사 CA가 키체인에 없으면 IT에 요청\n" +
-  "TLS 검증을 끄는 방법은 쓰지 마세요 — GitHub 토큰이 그대로 노출됩니다."
-
-function isTlsTrustError(message: string): boolean {
-  return /self[- ]signed certificate|unable to (get|verify) local issuer|CERT_|certificate chain/i.test(
-    message,
-  )
 }
 
 // Only run when invoked as the CLI — tests import parseArgs from here.

@@ -4,7 +4,11 @@
 // terminal chunks), count_tokens, and error mapping — no GitHub auth.
 
 import { afterAll, beforeAll, describe, expect, test } from "bun:test"
-import { startServer, type ServerHandle } from "../src/server"
+import {
+  sanitizeBeta,
+  startServer,
+  type ServerHandle,
+} from "../src/server"
 import { discoverModels } from "../src/token"
 
 let upstream: ReturnType<typeof Bun.serve>
@@ -642,5 +646,21 @@ describe("adapter server", () => {
     expect(res.status).toBe(502)
     const body = (await res.json()) as { error: { type: string } }
     expect(body.error.type).toBe("api_error")
+  })
+})
+
+describe("sanitizeBeta", () => {
+  test("drops the 1M-context beta for a model that lacks the window", () => {
+    // [1m] on a picker row makes claude ask for this beta; forwarding it to a
+    // model without the window makes Copilot reject the whole request.
+    expect(sanitizeBeta("context-1m-2025-08-07", "mock-chat")).toBeUndefined()
+    expect(
+      sanitizeBeta("other-beta,context-1m-2025-08-07", "mock-chat"),
+    ).toBe("other-beta")
+  })
+
+  test("leaves unrelated betas and absent headers alone", () => {
+    expect(sanitizeBeta("some-beta", "mock-chat")).toBe("some-beta")
+    expect(sanitizeBeta(undefined, "mock-chat")).toBeUndefined()
   })
 })

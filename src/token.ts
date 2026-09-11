@@ -4,12 +4,16 @@
 import {
   GITHUB_API_BASE_URL,
   copilotBaseUrl,
+  copilotFetch,
   copilotRequestHeaders,
   githubRequestHeaders,
   isMockMode,
   setCopilotBase,
 } from "./api"
 import { ensureGithubToken } from "./auth"
+import { advertisedId } from "./catalog"
+import { isTlsTrustError } from "./tls"
+import { setModelAliases } from "./translate"
 
 export interface ModelMapping {
   opus: string
@@ -50,7 +54,7 @@ export async function getCopilotToken(force = false): Promise<string> {
 
 async function fetchCopilotToken(): Promise<string> {
   githubToken ??= (await ensureGithubToken()).token
-  const res = await fetch(`${GITHUB_API_BASE_URL}/copilot_internal/v2/token`, {
+  const res = await copilotFetch(`${GITHUB_API_BASE_URL}/copilot_internal/v2/token`, {
     headers: githubRequestHeaders(githubToken),
     // Short metadata call — never let a hung connection stall startup.
     signal: AbortSignal.timeout(10_000),
@@ -130,6 +134,8 @@ export interface UpstreamModel {
   maxContextTokens?: number
   policyState?: string
   pickerEnabled?: boolean
+  /** capabilities.type — "chat" for anything you can hold a turn with. */
+  type?: string
 }
 
 // Raw upstream model list, captured during discovery at startup. The server
@@ -158,6 +164,7 @@ interface RawModel {
   model_picker_enabled?: boolean
   policy?: { state?: string }
   capabilities?: {
+    type?: string
     limits?: { max_prompt_tokens?: number; max_context_window_tokens?: number }
     supports?: { reasoning_effort?: string[] }
   }
@@ -178,6 +185,7 @@ function toUpstreamModel(m: RawModel): UpstreamModel | null {
     maxContextTokens: numberOrUndefined(limits?.max_context_window_tokens),
     policyState: m.policy?.state,
     pickerEnabled: m.model_picker_enabled,
+    type: m.capabilities?.type,
   }
 }
 
@@ -187,9 +195,20 @@ function numberOrUndefined(value: unknown): number | undefined {
     : undefined
 }
 
+// Why discovery fell back, if it did. Held rather than printed so the caller
+// can surface it after its spinner stops.
+let softFailure: string | null = null
+
+export function takeDiscoverySoftFailure(): string | null {
+  const out = softFailure
+  softFailure = null
+  return out
+}
+
 // Resolve Copilot model slugs for Claude Code's opus/sonnet/haiku slots.
 // Priority: env overrides > Copilot /models discovery > hardcoded fallback.
 export async function discoverModels(): Promise<ModelMapping> {
+  softFailure = null
   const env = (name: string) => process.env[name]?.trim() || undefined
   const overrides = {
     opus: env("CLCO_OPUS"),
@@ -200,7 +219,7 @@ export async function discoverModels(): Promise<ModelMapping> {
   let reason = ""
   try {
     const token = await getCopilotToken()
-    const res = await fetch(`${copilotBaseUrl()}/models`, {
+    const res = await copilotFetch(`${copilotBaseUrl()}/models`, {
       headers: copilotRequestHeaders(token),
       signal: AbortSignal.timeout(10_000),
     })
@@ -213,6 +232,18 @@ export async function discoverModels(): Promise<ModelMapping> {
       cachedModelList = raw
         .map(toUpstreamModel)
         .filter((m): m is UpstreamModel => m !== null)
+      // Teach the translator every id the picker is about to advertise, so a
+      // model chosen by its catalog-form id still reaches the right slug.
+      setModelAliases(
+        new Map(
+          cachedModelList.flatMap((m) => {
+            const advertised = advertisedId(m.id)
+            return advertised && advertised !== m.id
+              ? ([[advertised, m.id]] as [string, string][])
+              : []
+          }),
+        ),
+      )
       const ids = cachedModelList.map((m) => m.id)
       const opus = overrides.opus ?? pickModel(ids, "claude-opus")
       const sonnet = overrides.sonnet ?? pickModel(ids, "claude-sonnet")
@@ -235,14 +266,17 @@ export async function discoverModels(): Promise<ModelMapping> {
       }
     }
   } catch (err) {
-    // Keep going with fallback slugs, but never hide why discovery failed —
-    // a TLS or auth problem here is the user's actual blocker.
     reason = err instanceof Error ? err.message : String(err)
+    // A broken trust chain is not a "carry on with fallback slugs" situation
+    // — it is the user's actual blocker, and every later request will fail
+    // the same way. Let it reach main().catch so the TLS hint gets printed.
+    if (isTlsTrustError(reason)) throw err
   }
-  console.error(
+  // Reported by the caller after any progress spinner has stopped; printing
+  // here would be painted over by the spinner that wraps this call.
+  softFailure =
     `[clco] Copilot /models 감지 실패 (${copilotBaseUrl()}${reason ? `: ${reason}` : ""})` +
-      ` — 기본 슬러그 사용 (CLCO_OPUS/SONNET/HAIKU로 지정 가능)`,
-  )
+    ` — 기본 슬러그 사용 (CLCO_OPUS/SONNET/HAIKU로 지정 가능)`
   return {
     opus: overrides.opus ?? FALLBACK_MODELS.opus,
     sonnet: overrides.sonnet ?? FALLBACK_MODELS.sonnet,
