@@ -32,6 +32,7 @@ async function migrateFromClcopilot(): Promise<void> {
   if (migrated) return
   migrated = true
   const legacyDir = join(homedir(), ".config", "clcopilot")
+  await mkdir(authDir(), { recursive: true }).catch(() => {})
   for (const name of ["auth.json", "prefs.json"]) {
     const target = join(authDir(), name)
     try {
