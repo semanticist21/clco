@@ -5,17 +5,34 @@
 // also merged into the child process environment.
 
 import { homedir } from "node:os"
-import { upstreamModels, type ModelMapping } from "./token"
+import {
+  modelInfo,
+  upstreamModels,
+  type ModelMapping,
+  type UpstreamModel,
+} from "./token"
 
 export function buildSettingsEnv(
   baseUrl: string,
   models: ModelMapping,
   defaultModel?: string,
+  /** Defaults to the discovery cache; injected directly in tests. */
+  modelMeta?: UpstreamModel | null,
 ): Record<string, string> {
+  const selected = defaultModel ?? models.sonnet
+  const info = modelMeta === undefined ? modelInfo(selected) : modelMeta
+  // Claude models are served through Copilot's native Anthropic endpoint, so
+  // the adapter forwards thinking blocks untouched; only the translation
+  // dialects need them suppressed.
+  const native = info?.endpoints.includes("/v1/messages") === true
+  // Prefer the upstream's own prompt budget so auto-compact fires before the
+  // model rejects the conversation.
+  const window = info?.maxPromptTokens ?? info?.maxContextTokens ?? 160000
+
   return {
     ANTHROPIC_BASE_URL: baseUrl,
     ANTHROPIC_AUTH_TOKEN: "clco-local",
-    ANTHROPIC_MODEL: defaultModel ?? models.sonnet,
+    ANTHROPIC_MODEL: selected,
     ANTHROPIC_DEFAULT_OPUS_MODEL: models.opus,
     ANTHROPIC_DEFAULT_SONNET_MODEL: models.sonnet,
     ANTHROPIC_DEFAULT_HAIKU_MODEL: models.haiku,
@@ -28,15 +45,15 @@ export function buildSettingsEnv(
     DISABLE_TELEMETRY: "1",
     DISABLE_AUTOUPDATER: "1",
     DISABLE_NON_ESSENTIAL_MODEL_CALLS: "1",
-    // The adapter drops thinking blocks; don't send them at all.
-    CLAUDE_CODE_DISABLE_THINKING: "1",
+    // Translation dialects drop thinking blocks; the native one keeps them.
+    ...(native ? {} : { CLAUDE_CODE_DISABLE_THINKING: "1" }),
     // Model slugs are unknown to Claude Code's context-window table.
     CLAUDE_CODE_DISABLE_UNKNOWN_MODEL_WINDOW_ENFORCEMENT: "1",
-    // Copilot-served Claude models have ~200k windows; never inherit a larger
-    // user setting (auto-compact must fire before the upstream rejects).
-    CLAUDE_CODE_AUTO_COMPACT_WINDOW: "160000",
+    // Never inherit a larger user setting than the upstream actually accepts.
+    CLAUDE_CODE_AUTO_COMPACT_WINDOW: String(window),
     // Slow upstream: never abort a stream for idling.
     API_FORCE_IDLE_TIMEOUT: "0",
+    API_TIMEOUT_MS: "3000000",
   }
 }
 

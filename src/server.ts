@@ -5,12 +5,15 @@ import { copilotBaseUrl, copilotRequestHeaders, isMockMode } from "./api"
 import {
   getCopilotToken,
   invalidateCopilotToken,
+  modelInfo,
+  supportsNativeMessages,
   upstreamModels,
   type ModelMapping,
 } from "./token"
 import {
   StreamTranslator,
   estimateTokens,
+  normalizeModel,
   translateRequest,
   translateResponse,
   type AnthropicRequest,
@@ -124,15 +127,30 @@ function detectVision(payload: OpenAIRequest): boolean {
 // family etc.) — remembered after the first chat/completions rejection.
 const responsesOnlyModels = new Set<string>()
 
+// Models whose native /v1/messages attempt was rejected — remembered so the
+// translation path is used directly from then on.
+const nativeRejectedModels = new Set<string>()
+
+type Dialect = "native" | "chat" | "responses"
+
 type ChatResult =
-  | { ok: true; res: Response; dialect: "chat" | "responses" }
+  | { ok: true; res: Response; dialect: Dialect }
   | { ok: false; status: number; message: string }
+
+/** The request as Claude Code sent it, for the native passthrough path. */
+interface NativeRequest {
+  body: string
+  anthropicVersion?: string
+  anthropicBeta?: string
+}
 
 async function copilotChat(
   payload: OpenAIRequest,
   anthropic: AnthropicRequest,
   upstreamBase: string,
   mockToken: boolean,
+  native?: NativeRequest,
+  allowedEfforts?: string[] | null,
 ): Promise<ChatResult> {
   const chatBody = JSON.stringify(payload)
   const agentInitiated = payload.messages.some(
@@ -140,25 +158,43 @@ async function copilotChat(
   )
   const vision = detectVision(payload)
 
+  // Copilot serves Claude models through the native Anthropic endpoint, so
+  // the request can go through untranslated — thinking, cache_control,
+  // effort and tool blocks all stay intact.
+  let useNative =
+    native !== undefined &&
+    !process.env.CLCO_NO_PASSTHROUGH &&
+    supportsNativeMessages(payload.model) &&
+    !nativeRejectedModels.has(payload.model)
   let useResponses = responsesOnlyModels.has(payload.model)
   let attempt = 0
   while (attempt < 2) {
     const token = mockToken ? "mock" : await getCopilotToken(attempt > 0)
-    const responsesReq = useResponses
-      ? toResponsesRequest(anthropic)
-      : null
-    const res = await fetch(
-      useResponses ? `${upstreamBase}/responses` : `${upstreamBase}/chat/completions`,
-      {
-        method: "POST",
-        headers: copilotRequestHeaders(token, {
-          agentInitiated,
-          vision,
-          accept: payload.stream ? "text/event-stream" : "application/json",
-        }),
-        body: useResponses ? JSON.stringify(responsesReq) : chatBody,
-      },
-    )
+    const endpoint = useNative
+      ? "/v1/messages"
+      : useResponses
+        ? "/responses"
+        : "/chat/completions"
+    const headers = copilotRequestHeaders(token, {
+      agentInitiated,
+      vision,
+      accept: payload.stream ? "text/event-stream" : "application/json",
+    })
+    if (useNative && native) {
+      // Forward the protocol headers verbatim; the upstream needs them to
+      // honour the same betas Claude Code asked for.
+      if (native.anthropicVersion) headers["anthropic-version"] = native.anthropicVersion
+      if (native.anthropicBeta) headers["anthropic-beta"] = native.anthropicBeta
+    }
+    const res = await fetch(`${upstreamBase}${endpoint}`, {
+      method: "POST",
+      headers,
+      body: useNative
+        ? native!.body
+        : useResponses
+          ? JSON.stringify(toResponsesRequest(anthropic, allowedEfforts))
+          : chatBody,
+    })
 
     if ((res.status === 401 || res.status === 403) && attempt === 0) {
       // Free the parked socket before retrying with a fresh token.
@@ -169,10 +205,27 @@ async function copilotChat(
     }
 
     if (res.ok) {
-      return { ok: true, res, dialect: useResponses ? "responses" : "chat" }
+      return {
+        ok: true,
+        res,
+        dialect: useNative ? "native" : useResponses ? "responses" : "chat",
+      }
     }
 
     const text = await res.text()
+    // The native endpoint refused this request shape or model: remember it
+    // and fall back to the translation path within the same budget. Quota,
+    // auth and rate-limit failures are not shape problems, so they surface
+    // as-is rather than burning a second upstream call.
+    if (
+      useNative &&
+      [400, 404, 415, 422].includes(res.status)
+    ) {
+      debug("native /v1/messages rejected:", res.status, text.slice(0, 300))
+      nativeRejectedModels.add(payload.model)
+      useNative = false
+      continue
+    }
     // Copilot serves some models only via the Responses API; switch and
     // retry within the same attempt budget.
     if (
@@ -334,9 +387,13 @@ async function handleMessages(
   mockToken: boolean,
 ): Promise<Response> {
   const started = Date.now()
+  // Read the body as text so the native path can forward it essentially
+  // untouched; the parse is only for inspection and the translation paths.
+  let rawBody: string
   let payload: AnthropicRequest
   try {
-    payload = (await req.json()) as AnthropicRequest
+    rawBody = await req.text()
+    payload = JSON.parse(rawBody) as AnthropicRequest
   } catch {
     return anthropicError(400, "invalid JSON body")
   }
@@ -345,10 +402,28 @@ async function handleMessages(
     `[${timestamp()}] POST /v1/messages model=${payload.model} stream=${stream}`,
   )
 
-  const upstreamPayload = translateRequest(payload)
+  const allowedEfforts = modelInfo(normalizeModel(payload.model))?.efforts ?? null
+  const upstreamPayload = translateRequest(payload, allowedEfforts)
+  // Only the model name is rewritten for the native path; every other field
+  // (thinking, cache_control, output_config, tools) rides through as sent.
+  const nativeBody =
+    payload.model === upstreamPayload.model
+      ? rawBody
+      : JSON.stringify({ ...payload, model: upstreamPayload.model })
   let result: Awaited<ReturnType<typeof copilotChat>>
   try {
-    result = await copilotChat(upstreamPayload, payload, upstreamBase, mockToken)
+    result = await copilotChat(
+      upstreamPayload,
+      payload,
+      upstreamBase,
+      mockToken,
+      {
+        body: nativeBody,
+        anthropicVersion: req.headers.get("anthropic-version") ?? undefined,
+        anthropicBeta: req.headers.get("anthropic-beta") ?? undefined,
+      },
+      allowedEfforts,
+    )
   } catch (err) {
     return anthropicError(502, `upstream request failed: ${String(err)}`)
   }
@@ -357,6 +432,21 @@ async function handleMessages(
     return anthropicError(result.status, result.message)
   }
   const res = result.res
+
+  if (result.dialect === "native") {
+    // Already Anthropic-shaped: relay verbatim, streaming included.
+    logLine(
+      `[${timestamp()}]   -> ${res.status} native${stream ? " streaming" : ""} (${Date.now() - started}ms)`,
+    )
+    const headers: Record<string, string> = {
+      "content-type": res.headers.get("content-type") ?? "application/json",
+    }
+    if (stream) {
+      headers["cache-control"] = "no-cache"
+      headers["x-accel-buffering"] = "no"
+    }
+    return new Response(res.body, { status: res.status, headers })
+  }
 
   if (!stream) {
     let data: OpenAIResponse

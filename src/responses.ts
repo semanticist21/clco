@@ -4,7 +4,7 @@
 // Responses SSE events into OpenAI-style chunks so the existing
 // StreamTranslator can render Anthropic events unchanged.
 
-import type { AnthropicRequest, OpenAIResponse } from "./translate"
+import { effortFor, type AnthropicRequest, type OpenAIResponse } from "./translate"
 
 // ---------------------------------------------------------------------------
 // Request direction: Anthropic -> Responses
@@ -27,9 +27,13 @@ interface ResponsesRequest {
   top_p?: number
   tools?: ResponsesTool[]
   tool_choice?: "auto" | "none" | "required" | { type: "function"; name: string }
+  reasoning?: { effort: string }
 }
 
-export function toResponsesRequest(payload: AnthropicRequest): ResponsesRequest {
+export function toResponsesRequest(
+  payload: AnthropicRequest,
+  allowedEfforts?: string[] | null,
+): ResponsesRequest {
   const input: Array<Record<string, unknown>> = []
 
   for (const message of payload.messages) {
@@ -136,9 +140,12 @@ export function toResponsesRequest(payload: AnthropicRequest): ResponsesRequest 
     ? payload.system.map((b) => b.text).join("\n\n")
     : payload.system
 
+  const effort = effortFor(payload, allowedEfforts)
+
   return {
     model: payload.model,
     ...(instructions && { instructions }),
+    ...(effort && { reasoning: { effort } }),
     input,
     stream: payload.stream,
     max_output_tokens: payload.max_tokens,

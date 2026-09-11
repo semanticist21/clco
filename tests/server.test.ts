@@ -9,6 +9,11 @@ import { discoverModels } from "../src/token"
 
 let upstream: ReturnType<typeof Bun.serve>
 let adapter: ServerHandle
+const nativeCalls: Array<{
+  body: string
+  beta: string | null
+  version: string | null
+}> = []
 
 const AUTH = { authorization: "Bearer clco-local" }
 
@@ -75,12 +80,70 @@ beforeAll(async () => {
           usage: { input_tokens: 6, output_tokens: 2 },
         })
       }
+      if (url.pathname === "/v1/messages") {
+        nativeCalls.push({
+          body: await req.text(),
+          beta: req.headers.get("anthropic-beta"),
+          version: req.headers.get("anthropic-version"),
+        })
+        const model = JSON.parse(nativeCalls[nativeCalls.length - 1]!.body).model
+        if (model === "mock-native-reject") {
+          return Response.json(
+            { type: "error", error: { message: "unsupported" } },
+            { status: 400 },
+          )
+        }
+        if (JSON.parse(nativeCalls[nativeCalls.length - 1]!.body).stream) {
+          return new Response(
+            [
+              'event: message_start',
+              'data: {"type":"message_start","message":{"id":"msg_n","type":"message","role":"assistant","content":[],"model":"mock-native","stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":3,"output_tokens":0}}}',
+              "",
+              "event: content_block_start",
+              'data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}',
+              "",
+              "event: content_block_delta",
+              'data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"native hi"}}',
+              "",
+              "event: message_stop",
+              'data: {"type":"message_stop"}',
+              "",
+            ].join("\n"),
+            { headers: { "content-type": "text/event-stream" } },
+          )
+        }
+        return Response.json({
+          id: "msg_n",
+          type: "message",
+          role: "assistant",
+          model: "mock-native",
+          content: [{ type: "text", text: "native non-stream" }],
+          stop_reason: "end_turn",
+          stop_sequence: null,
+          usage: { input_tokens: 3, output_tokens: 2 },
+        })
+      }
       if (url.pathname === "/models") {
         return Response.json({
           data: [
             { id: "mock-sonnet", name: "Mock Sonnet" },
             { id: "mock-opus", name: "Mock Opus" },
             { id: "mock-luna" },
+            {
+              id: "mock-native",
+              name: "Mock Native",
+              supported_endpoints: ["/v1/messages", "/chat/completions"],
+              model_picker_enabled: true,
+              policy: { state: "enabled" },
+              capabilities: {
+                limits: { max_prompt_tokens: 200000, max_context_window_tokens: 264000 },
+                supports: { reasoning_effort: ["low", "medium", "high"] },
+              },
+            },
+            {
+              id: "mock-native-reject",
+              supported_endpoints: ["/v1/messages", "/chat/completions"],
+            },
           ],
         })
       }
@@ -418,11 +481,12 @@ describe("adapter server", () => {
       has_more: boolean
     }
     expect(body.has_more).toBe(false)
-    expect(body.data).toEqual([
+    expect(body.data.slice(0, 3)).toEqual([
       { type: "model", id: "mock-sonnet", display_name: "Mock Sonnet" },
       { type: "model", id: "mock-opus", display_name: "Mock Opus" },
       { type: "model", id: "mock-luna", display_name: "mock-luna" },
     ])
+    expect(body.data.map((m) => m.id)).toContain("mock-native")
     // Discovery requires the bearer token like every other endpoint.
     const noAuth = await fetch(`${adapter.url}/v1/models`)
     expect(noAuth.status).toBe(401)
@@ -480,6 +544,87 @@ describe("adapter server", () => {
     expect(body.content[0]).toEqual({ type: "text", text: "Luna non-stream" })
     expect(body.stop_reason).toBe("end_turn")
     expect(body.usage).toEqual({ input_tokens: 6, output_tokens: 2 })
+  })
+
+  test("native models stream straight through, untranslated", async () => {
+    nativeCalls.length = 0
+    const res = await fetch(`${adapter.url}/v1/messages`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        ...AUTH,
+        "anthropic-version": "2023-06-01",
+        "anthropic-beta": "some-beta,another-beta",
+      },
+      body: JSON.stringify({
+        model: "mock-native",
+        max_tokens: 32,
+        stream: true,
+        // Fields the translation path would drop must survive verbatim.
+        thinking: { type: "enabled", budget_tokens: 1024 },
+        output_config: { effort: "high" },
+        system: [
+          { type: "text", text: "be brief", cache_control: { type: "ephemeral" } },
+        ],
+        messages: [{ role: "user", content: "hi" }],
+      }),
+    })
+    expect(res.status).toBe(200)
+    const text = await res.text()
+    // Relayed as-is: Anthropic SSE the adapter never re-encoded.
+    expect(text).toContain('"type":"message_start"')
+    expect(text).toContain("native hi")
+
+    expect(nativeCalls).toHaveLength(1)
+    const call = nativeCalls[0]!
+    expect(call.version).toBe("2023-06-01")
+    expect(call.beta).toBe("some-beta,another-beta")
+    const sent = JSON.parse(call.body)
+    expect(sent.thinking).toEqual({ type: "enabled", budget_tokens: 1024 })
+    expect(sent.output_config).toEqual({ effort: "high" })
+    expect(sent.system[0].cache_control).toEqual({ type: "ephemeral" })
+  })
+
+  test("native models also relay non-streaming responses verbatim", async () => {
+    nativeCalls.length = 0
+    const res = await post("/v1/messages", {
+      model: "mock-native",
+      max_tokens: 32,
+      messages: [{ role: "user", content: "hi" }],
+    })
+    expect(res.status).toBe(200)
+    const body = (await res.json()) as {
+      type: string
+      content: Array<{ type: string; text: string }>
+      usage: { input_tokens: number; output_tokens: number }
+    }
+    expect(body.type).toBe("message")
+    expect(body.content[0]).toEqual({ type: "text", text: "native non-stream" })
+    expect(body.usage).toEqual({ input_tokens: 3, output_tokens: 2 })
+  })
+
+  test("a rejected native attempt falls back to the translation path", async () => {
+    nativeCalls.length = 0
+    const res = await post("/v1/messages", {
+      model: "mock-native-reject",
+      max_tokens: 32,
+      messages: [{ role: "user", content: "hi" }],
+    })
+    expect(res.status).toBe(200)
+    // Native was tried once, then the chat dialect answered.
+    expect(nativeCalls).toHaveLength(1)
+    const body = (await res.json()) as { content: Array<{ text: string }> }
+    expect(body.content[0]!.text).toBe("Hi there")
+
+    // The rejection is remembered: no second native attempt.
+    nativeCalls.length = 0
+    const again = await post("/v1/messages", {
+      model: "mock-native-reject",
+      max_tokens: 32,
+      messages: [{ role: "user", content: "hi" }],
+    })
+    expect(again.status).toBe(200)
+    expect(nativeCalls).toHaveLength(0)
   })
 
   test("upstream connection failures map to Anthropic error bodies", async () => {

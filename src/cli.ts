@@ -10,7 +10,7 @@ import { homedir } from "node:os"
 import { join } from "node:path"
 import { clearAuth, loadPrefs, savePrefs } from "./config"
 import { ensureGithubToken, runDeviceFlow } from "./auth"
-import { isMockMode } from "./api"
+import { GITHUB_API_BASE_URL, githubRequestHeaders, isMockMode } from "./api"
 import { discoverModels, upstreamModels } from "./token"
 import { setAdapterLogSink, startServer } from "./server"
 import { resolveClaude, runClaude } from "./spawn"
@@ -36,11 +36,12 @@ const HELP = `clco — GitHub Copilot 구독으로 Claude Code 실행
   CLCO_UPSTREAM           업스트림 베이스 URL 오버라이드 (목업 테스트용, 인증 생략)
   CLCO_OPUS/SONNET/HAIKU  모델 슬러그 오버라이드
   CLCO_NO_SELECT=1        모델 선택 프롬프트 생략
+  CLCO_NO_PASSTHROUGH=1   네이티브 /v1/messages 경로 비활성화 (항상 번역)
   CLCO_EDITOR_VERSION / CLCO_CHAT_VERSION  클라이언트 식별 버전 오버라이드
 `
 
 interface Args {
-  command: "run" | "serve" | "auth" | "login" | "logout" | "update"
+  command: "run" | "serve" | "auth" | "login" | "logout" | "update" | "status"
   port?: number
   claudeArgs: string[]
 }
@@ -54,12 +55,13 @@ const COMMAND_LIST = `명령어:
   clco login|auth      GitHub (재)인증
   clco logout          저장된 토큰 삭제
   clco update          최신 버전으로 갱신
+  clco status          계정·모델 권한·엔드포인트 확인
   clco --port N        어댑터 포트 고정
   clco help            도움말
 
-claude 인자는 -- 뒤에:  clco -- -p "질문"  /  clco -- --model luna-5.6`
+claude 인자는 그대로 전달됩니다:  clco -p "질문"  /  clco --chrome  /  clco --dangerously-skip-permissions`
 
-function parseArgs(rawArgv: string[]): Args {
+export function parseArgs(rawArgv: string[]): Args {
   // The launcher replaces a leading "--" with this sentinel because bun
   // strips the bare separator before scripts ever see it.
   const argv =
@@ -77,7 +79,7 @@ function parseArgs(rawArgv: string[]): Args {
     const arg = leading[i]
     if (
       (arg === "serve" || arg === "auth" || arg === "login" ||
-        arg === "logout" || arg === "update") &&
+        arg === "logout" || arg === "update" || arg === "status") &&
       command === "run"
     ) {
       command = arg
@@ -97,8 +99,14 @@ function parseArgs(rawArgv: string[]): Args {
     if (arg === "__clco_passthrough__") {
       return { command, port, claudeArgs: [...leading.slice(i + 1), ...trailing] }
     }
+    // A dashed flag we don't own is claude's (--chrome, -p,
+    // --dangerously-skip-permissions, ...). A bare word is almost always a
+    // mistyped subcommand, so that still fails loudly.
+    if (arg !== undefined && arg.startsWith("-")) {
+      return { command, port, claudeArgs: [...leading.slice(i), ...trailing] }
+    }
     throw new Error(
-      `알 수 없는 인자: "${arg}"\n(claude 인자는 -- 뒤에 넣으세요: clco -- ${leading.slice(i).join(" ")})\n\n${COMMAND_LIST}`,
+      `알 수 없는 명령: "${arg}"\n(claude 인자라면 -- 뒤에 넣으세요: clco -- ${leading.slice(i).join(" ")})\n\n${COMMAND_LIST}`,
     )
   }
   return { command, port, claudeArgs: trailing }
@@ -182,6 +190,54 @@ async function runUpdate(): Promise<void> {
   console.error(`✓ 업데이트 완료 (${head.stdout.toString().trim()}) — 다음 실행부터 적용`)
 }
 
+// Show what this account can actually reach: which models are enabled, which
+// dialect each one routes through, and their declared effort/context limits.
+async function runStatus(): Promise<void> {
+  const identity = await ensureGithubToken()
+  // The stored token may predate login capture; ask GitHub directly so the
+  // answer to "which account am I on" is never ambiguous.
+  let login = identity.login
+  if (!login && !isMockMode()) {
+    try {
+      const res = await fetch(`${GITHUB_API_BASE_URL}/user`, {
+        headers: githubRequestHeaders(identity.token),
+        signal: AbortSignal.timeout(10_000),
+      })
+      if (res.ok) login = ((await res.json()) as { login?: string }).login
+    } catch {
+      // best effort
+    }
+  }
+  console.log(`계정: ${login ? `@${login}` : "(로그인됨, 계정명 확인 실패)"}`)
+  await discoverModels()
+  const models = upstreamModels()
+  if (models.length === 0) {
+    console.log("모델 목록을 가져오지 못했습니다 (네트워크 또는 구독 확인)")
+    return
+  }
+  const route = (m: (typeof models)[number]) =>
+    m.endpoints.includes("/v1/messages")
+      ? "native"
+      : m.endpoints.includes("/responses")
+        ? "responses"
+        : "chat"
+  console.log(
+    `\n${"모델".padEnd(24)} ${"경로".padEnd(10)} ${"정책".padEnd(10)} ${"컨텍스트".padEnd(10)} effort`,
+  )
+  for (const m of models) {
+    if (m.pickerEnabled === false) continue
+    const ctx = m.maxPromptTokens ?? m.maxContextTokens
+    console.log(
+      `${m.id.padEnd(24)} ${route(m).padEnd(10)} ${(m.policyState ?? "?").padEnd(10)} ` +
+        `${String(ctx ?? "?").padEnd(10)} ${m.efforts ? m.efforts.join(",") : "-"}`,
+    )
+  }
+  console.log(
+    "\nquota는 실제 요청 시점에만 확인됩니다 (Copilot에 사전 조회 API가 없음).\n" +
+      "소진 시 402와 함께 안내가 표시됩니다.",
+  )
+}
+
 async function main(): Promise<void> {
   const argv = process.argv.slice(2)
   if (["help", "--help", "-h"].includes(argv[0] ?? "")) {
@@ -192,6 +248,11 @@ async function main(): Promise<void> {
 
   if (args.command === "update") {
     await runUpdate()
+    return
+  }
+
+  if (args.command === "status") {
+    await runStatus()
     return
   }
 
@@ -331,7 +392,10 @@ async function main(): Promise<void> {
   process.exit(code)
 }
 
-main().catch((err) => {
-  console.error(`오류: ${err instanceof Error ? err.message : String(err)}`)
-  process.exit(1)
-})
+// Only run when invoked as the CLI — tests import parseArgs from here.
+if (import.meta.main) {
+  main().catch((err) => {
+    console.error(`오류: ${err instanceof Error ? err.message : String(err)}`)
+    process.exit(1)
+  })
+}

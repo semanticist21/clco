@@ -10,14 +10,83 @@ Bun.serve({
   fetch: async (req) => {
     const url = new URL(req.url)
     if (url.pathname === "/models") {
+      const native = ["/v1/messages", "/chat/completions"]
       return Response.json({
         data: [
-          { id: "mock-opus" },
-          { id: "mock-sonnet" },
-          { id: "mock-haiku" },
-        ],
+          // Claude-style models route through the native Anthropic endpoint,
+          // exactly as real Copilot declares them.
+          { id: "mock-opus", supported_endpoints: native },
+          { id: "mock-sonnet", supported_endpoints: native },
+          { id: "mock-haiku", supported_endpoints: native },
+          // Translation-path model, for exercising the chat dialect.
+          { id: "mock-chat", supported_endpoints: ["/chat/completions"] },
+        ].map((m) => ({
+          ...m,
+          model_picker_enabled: true,
+          policy: { state: "enabled" },
+          capabilities: {
+            limits: { max_prompt_tokens: 200000, max_context_window_tokens: 264000 },
+            supports: { reasoning_effort: ["low", "medium", "high", "xhigh", "max"] },
+          },
+        })),
       })
     }
+
+    if (url.pathname === "/v1/messages") {
+      const body = (await req.json()) as { stream?: boolean; model: string }
+      const text = "Mock native 응답: 정상 동작"
+      if (body.stream) {
+        return new Response(
+          [
+            `event: message_start\ndata: ${JSON.stringify({
+              type: "message_start",
+              message: {
+                id: "msg_mock",
+                type: "message",
+                role: "assistant",
+                content: [],
+                model: body.model,
+                stop_reason: null,
+                stop_sequence: null,
+                usage: { input_tokens: 5, output_tokens: 0 },
+              },
+            })}\n\n`,
+            `event: content_block_start\ndata: ${JSON.stringify({
+              type: "content_block_start",
+              index: 0,
+              content_block: { type: "text", text: "" },
+            })}\n\n`,
+            `event: content_block_delta\ndata: ${JSON.stringify({
+              type: "content_block_delta",
+              index: 0,
+              delta: { type: "text_delta", text },
+            })}\n\n`,
+            `event: content_block_stop\ndata: ${JSON.stringify({
+              type: "content_block_stop",
+              index: 0,
+            })}\n\n`,
+            `event: message_delta\ndata: ${JSON.stringify({
+              type: "message_delta",
+              delta: { stop_reason: "end_turn", stop_sequence: null },
+              usage: { output_tokens: 6 },
+            })}\n\n`,
+            `event: message_stop\ndata: ${JSON.stringify({ type: "message_stop" })}\n\n`,
+          ].join(""),
+          { headers: { "content-type": "text/event-stream" } },
+        )
+      }
+      return Response.json({
+        id: "msg_mock",
+        type: "message",
+        role: "assistant",
+        model: body.model,
+        content: [{ type: "text", text }],
+        stop_reason: "end_turn",
+        stop_sequence: null,
+        usage: { input_tokens: 5, output_tokens: 6 },
+      })
+    }
+
     if (url.pathname !== "/chat/completions") {
       return new Response("not found", { status: 404 })
     }

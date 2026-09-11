@@ -198,6 +198,53 @@ describe("translateRequest", () => {
     expect(nonStream.stream_options).toBeUndefined()
   })
 
+  test("effort is sent only when the model declares that value", () => {
+    const base = {
+      model: "m",
+      max_tokens: 8,
+      messages: [{ role: "user" as const, content: "hi" }],
+      output_config: { effort: "xhigh" },
+    }
+    // Copilot publishes the accepted values per model in /models capabilities.
+    expect(translateRequest(base, ["low", "medium", "high", "xhigh"]).reasoning_effort).toBe(
+      "xhigh",
+    )
+    expect(translateRequest(base, ["low", "medium", "high"]).reasoning_effort).toBeUndefined()
+    expect(translateRequest(base, null).reasoning_effort).toBeUndefined()
+    expect(translateRequest(base).reasoning_effort).toBeUndefined()
+    expect(
+      translateRequest({ ...base, output_config: undefined }, ["xhigh"]).reasoning_effort,
+    ).toBeUndefined()
+  })
+
+  test("cache_control markers become Copilot's copilot_cache_control", () => {
+    const out = translateRequest({
+      model: "m",
+      max_tokens: 8,
+      system: [
+        { type: "text", text: "sys", cache_control: { type: "ephemeral" } },
+      ],
+      messages: [
+        {
+          role: "user",
+          content: [
+            { type: "text", text: "cached", cache_control: { type: "ephemeral" } },
+          ],
+        },
+        { role: "user", content: [{ type: "text", text: "plain" }] },
+      ],
+    })
+    expect(out.messages[0]).toMatchObject({
+      role: "system",
+      copilot_cache_control: { type: "ephemeral" },
+    })
+    expect(out.messages[1]).toMatchObject({
+      content: "cached",
+      copilot_cache_control: { type: "ephemeral" },
+    })
+    expect(out.messages[2]!.copilot_cache_control).toBeUndefined()
+  })
+
   test("normalizeModel strips date/bracket suffixes and dot-ifies known slugs", () => {
     expect(normalizeModel("claude-sonnet-4.5")).toBe("claude-sonnet-4.5")
     expect(normalizeModel("claude-sonnet-4-5-20250929")).toBe(

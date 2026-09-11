@@ -94,6 +94,20 @@ describe("ResponsesEventAdapter", () => {
     expect(failed?.error?.message).toBe("quota exhausted")
   })
 
+  test("reasoning.effort is clamped to the model's declared values", () => {
+    const base = {
+      model: "gpt-5.6-luna",
+      max_tokens: 8,
+      messages: [{ role: "user" as const, content: "hi" }],
+      output_config: { effort: "max" },
+    }
+    expect(toResponsesRequest(base, ["low", "medium", "high", "max"]).reasoning).toEqual({
+      effort: "max",
+    })
+    expect(toResponsesRequest(base, ["low", "medium", "high"]).reasoning).toBeUndefined()
+    expect(toResponsesRequest(base).reasoning).toBeUndefined()
+  })
+
   test("images in tool_result become a placeholder + adjacent input_image user item", () => {
     const out = toResponsesRequest({
       model: "gpt-5.6-luna",

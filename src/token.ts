@@ -96,13 +96,73 @@ function pickModel(ids: string[], needle: string): string | undefined {
   return matches[0]
 }
 
+/** What Copilot's /models tells us about one model. */
+export interface UpstreamModel {
+  id: string
+  name: string
+  /** e.g. ["/v1/messages", "/chat/completions"] — drives dialect routing. */
+  endpoints: string[]
+  /** Declared reasoning_effort values, or null when the model has none. */
+  efforts: string[] | null
+  maxPromptTokens?: number
+  maxContextTokens?: number
+  policyState?: string
+  pickerEnabled?: boolean
+}
+
 // Raw upstream model list, captured during discovery at startup. The server
 // serves GET /v1/models from this so Claude Code's 3-second discovery
 // timeout is never hit waiting on a live upstream fetch.
-let cachedModelList: Array<{ id: string; name: string }> | null = null
+let cachedModelList: UpstreamModel[] | null = null
 
-export function upstreamModels(): Array<{ id: string; name: string }> {
+export function upstreamModels(): UpstreamModel[] {
   return cachedModelList ?? []
+}
+
+export function modelInfo(id: string): UpstreamModel | undefined {
+  return cachedModelList?.find((m) => m.id === id)
+}
+
+/** Copilot serves Claude models through the native Anthropic endpoint. */
+export function supportsNativeMessages(id: string): boolean {
+  return modelInfo(id)?.endpoints.includes("/v1/messages") ?? false
+}
+
+interface RawModel {
+  id?: string
+  name?: string
+  slug?: string
+  supported_endpoints?: string[]
+  model_picker_enabled?: boolean
+  policy?: { state?: string }
+  capabilities?: {
+    limits?: { max_prompt_tokens?: number; max_context_window_tokens?: number }
+    supports?: { reasoning_effort?: string[] }
+  }
+}
+
+function toUpstreamModel(m: RawModel): UpstreamModel | null {
+  const id = m.id ?? m.slug
+  if (!id) return null
+  const limits = m.capabilities?.limits
+  return {
+    id,
+    name: m.name ?? id,
+    endpoints: Array.isArray(m.supported_endpoints) ? m.supported_endpoints : [],
+    efforts: Array.isArray(m.capabilities?.supports?.reasoning_effort)
+      ? m.capabilities.supports.reasoning_effort
+      : null,
+    maxPromptTokens: numberOrUndefined(limits?.max_prompt_tokens),
+    maxContextTokens: numberOrUndefined(limits?.max_context_window_tokens),
+    policyState: m.policy?.state,
+    pickerEnabled: m.model_picker_enabled,
+  }
+}
+
+function numberOrUndefined(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) && value > 0
+    ? value
+    : undefined
 }
 
 // Resolve Copilot model slugs for Claude Code's opus/sonnet/haiku slots.
@@ -123,16 +183,13 @@ export async function discoverModels(): Promise<ModelMapping> {
     })
     if (res.ok) {
       const body = (await res.json()) as {
-        data?: Array<{ id?: string; name?: string; slug?: string }>
-        models?: Array<{ id?: string; name?: string; slug?: string }>
+        data?: RawModel[]
+        models?: RawModel[]
       }
       const raw = body.models ?? body.data ?? []
       cachedModelList = raw
-        .map((m) => ({
-          id: m.id ?? m.slug ?? "",
-          name: m.name ?? m.id ?? m.slug ?? "",
-        }))
-        .filter((m) => m.id)
+        .map(toUpstreamModel)
+        .filter((m): m is UpstreamModel => m !== null)
       const ids = cachedModelList.map((m) => m.id)
       const opus = overrides.opus ?? pickModel(ids, "claude-opus")
       const sonnet = overrides.sonnet ?? pickModel(ids, "claude-sonnet")

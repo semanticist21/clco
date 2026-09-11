@@ -10,10 +10,27 @@
 // Anthropic types (subset Claude Code actually sends)
 // ---------------------------------------------------------------------------
 
-interface AnthropicTextBlock {
+interface CacheControl {
+  cache_control?: { type?: string } | null
+}
+
+interface AnthropicTextBlock extends CacheControl {
   type: "text"
   text: string
 }
+
+function marked(blocks: unknown): boolean {
+  return (
+    Array.isArray(blocks) &&
+    blocks.some(
+      (b) => b && typeof b === "object" && (b as CacheControl).cache_control,
+    )
+  )
+}
+
+// Copilot's OpenAI-compatible surface spells the prompt-cache marker
+// `copilot_cache_control` rather than the standard `cache_control`.
+const COPILOT_CACHE = { type: "ephemeral" } as const
 
 interface AnthropicThinkingBlock {
   type: "thinking"
@@ -75,6 +92,20 @@ export interface AnthropicRequest {
   stop_sequences?: string[]
   metadata?: { user_id?: string }
   thinking?: unknown
+  /** Claude Code's /effort setting rides here (gateway protocol). */
+  output_config?: { effort?: string }
+}
+
+// Copilot declares the reasoning_effort values each model accepts in its
+// /models capabilities. Send the effort only when the model claims it —
+// anything else is dropped rather than risking a 400.
+export function effortFor(
+  payload: AnthropicRequest,
+  allowed: string[] | null | undefined,
+): string | undefined {
+  const effort = payload.output_config?.effort
+  if (!effort || !allowed || !allowed.includes(effort)) return undefined
+  return effort
 }
 
 // ---------------------------------------------------------------------------
@@ -104,6 +135,7 @@ interface OpenAIMessage {
   content: OpenAIContent
   tool_calls?: OpenAIToolCall[]
   tool_call_id?: string
+  copilot_cache_control?: { type: "ephemeral" }
 }
 
 export interface OpenAIRequest {
@@ -113,6 +145,7 @@ export interface OpenAIRequest {
   stop?: string[] | null
   stream?: boolean
   stream_options?: { include_usage: boolean }
+  reasoning_effort?: string
   temperature?: number
   top_p?: number
   user?: string | null
@@ -334,7 +367,13 @@ function translateSystem(
     typeof system === "string"
       ? system
       : system.map((b) => b.text).join("\n\n")
-  return [{ role: "system", content: text }]
+  return [
+    {
+      role: "system",
+      content: text,
+      ...(marked(system) && { copilot_cache_control: COPILOT_CACHE }),
+    },
+  ]
 }
 
 function translateTools(
@@ -371,16 +410,28 @@ function translateToolChoice(
   }
 }
 
-export function translateRequest(payload: AnthropicRequest): OpenAIRequest {
+export function translateRequest(
+  payload: AnthropicRequest,
+  allowedEfforts?: string[] | null,
+): OpenAIRequest {
+  const effort = effortFor(payload, allowedEfforts)
   return {
     model: normalizeModel(payload.model),
+    ...(effort && { reasoning_effort: effort }),
     messages: [
       ...translateSystem(payload.system),
-      ...payload.messages.flatMap((message) =>
-        message.role === "user"
-          ? translateUserMessage(message)
-          : translateAssistantMessage(message),
-      ),
+      ...payload.messages.flatMap((message) => {
+        const out =
+          message.role === "user"
+            ? translateUserMessage(message)
+            : translateAssistantMessage(message)
+        // Carry a cache breakpoint onto the last message this turn produced.
+        const last = out[out.length - 1]
+        if (last && marked(message.content)) {
+          last.copilot_cache_control = COPILOT_CACHE
+        }
+        return out
+      }),
     ],
     max_tokens: payload.max_tokens,
     stop: payload.stop_sequences?.length ? payload.stop_sequences : null,

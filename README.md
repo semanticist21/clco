@@ -32,7 +32,9 @@ Prefer a different location: `CLCO_DIR=~/somewhere curl -fsSL ... | bash`
 
 ```sh
 clco                      # first run: GitHub device-flow login → pick a model → claude
-clco -- -p "question"     # args after -- go straight to claude (skips the model picker)
+clco -p "question"        # any flag clco doesn't own goes straight to claude
+clco --chrome             # ...including claude's own flags
+clco status               # account, per-model policy, route and limits
 clco serve                # run the adapter server only
 clco login / clco auth    # (re)authenticate — also switches accounts
 clco logout               # delete the stored token (model preference is kept)
@@ -43,7 +45,7 @@ clco help
 - **Models**: clco fetches every model your Copilot plan offers and lets you search them at startup. Your last pick is remembered as the default.
   Switch mid-session with `/model` inside claude, or pin one: `clco -- --model luna-5.6` / `CLCO_SONNET=luna-5.6 clco`
   (slot overrides: `CLCO_OPUS` / `CLCO_SONNET` / `CLCO_HAIKU` / `CLCO_FABLE`)
-- **Typo guard**: unknown args before `--` fail fast with the full command list instead of silently starting a session.
+- **Typo guard**: a mistyped subcommand (a bare word like `updaet`) fails fast with the full command list instead of silently starting a session. Dashed flags are always claude's.
 - **Auth**: the token is stored once at `~/.config/clco/auth.json` (mode 600). If it's ever rejected, `clco auth` re-authenticates.
 - **Debug**: `CLCO_DEBUG=1 clco` — adapter request logs go to `~/.config/clco/adapter.log`.
 
@@ -61,7 +63,11 @@ curl -fsSL https://raw.githubusercontent.com/semanticist21/clco/main/uninstall.s
 
 1. One-time GitHub OAuth device flow → long-lived token stored locally.
 2. That token mints short-lived Copilot tokens automatically while a local adapter (127.0.0.1, ephemeral port) is running.
-3. claude is pointed at the adapter via `--settings` (no config files modified) — the adapter translates Anthropic Messages ↔ Copilot (`chat/completions`, with an automatic fallback to the Responses API for models like the GPT-5.x family). SSE streaming, tool calling, images, and parallel tool calls are supported.
+3. claude is pointed at the adapter via `--settings` (no config files modified). The adapter picks a route per model from Copilot's own `/models` capabilities:
+   - **native** — Copilot serves Claude models on `/v1/messages`, the real Anthropic endpoint, so those requests pass through untranslated: thinking, `cache_control`, `/effort` and tool blocks all stay intact.
+   - **translated** — everything else is converted to `chat/completions`, or to the Responses API for models that require it (the GPT-5.x family). SSE streaming, tool calling, images and parallel tool calls are supported on both.
+
+   A native attempt that gets rejected falls back to the translated path automatically and is remembered. `CLCO_NO_PASSTHROUGH=1` forces translation everywhere.
 
 ## Development
 
@@ -75,5 +81,6 @@ CLCO_UPSTREAM=http://127.0.0.1:9099 bun run scripts/mock-upstream.ts  # mock ups
 ## Caveats
 
 - Using Copilot outside official clients is a gray area of GitHub's terms. Heavy use may flag your account, and Claude models consume premium quota. Intended for personal use.
-- Extended thinking is not supported. `stop_sequences` are not enforced on Responses-API models (the GPT-5.x family).
+- Extended thinking works on the native route only; it stays disabled on translated routes. `stop_sequences` are not enforced on Responses-API models (the GPT-5.x family).
+- `/effort` is forwarded when the selected model declares that level in its Copilot capabilities, and dropped otherwise.
 - License: [MIT](LICENSE)
