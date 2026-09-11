@@ -20,8 +20,8 @@ const HELP = `clco — GitHub Copilot 구독으로 Claude Code 실행
 사용법:
   clco [--port N] [-- <claude 인자>]
       GitHub 인증(최초 1회) → 모델 선택 → 로컬 어댑터 기동 → claude 실행.
-      어댑터 어휘(serve/auth/--port/help) 밖의 첫 인자부터는 전부 claude에 전달됨.
-      인자를 주면(clco -- -p 등) 모델 선택 프롬프트는 건너뜀.
+      claude 인자는 반드시 -- 뒤에: clco -- -p "질문" (이때 선택 프롬프트 생략).
+      -- 앞의 모르는 인자는 에러 + 명령어 리스트를 표시합니다.
   clco serve [--port N]
       어댑터 서버만 기동 (claude는 직접 연결해서 사용)
   clco login
@@ -45,10 +45,27 @@ interface Args {
   claudeArgs: string[]
 }
 
-// Our own vocabulary is tiny (serve/auth/--port); the first argument outside
-// it starts claude's args, wherever it appears. An explicit `--` also works
-// (`bun run` may swallow it, so it is optional).
-function parseArgs(argv: string[]): Args {
+// Our own vocabulary is tiny (serve/auth/login/logout/update/--port/help).
+// Anything else before `--` is a typo — fail loudly with the command list
+// instead of silently launching a conversation. claude args go after `--`.
+const COMMAND_LIST = `명령어:
+  clco                 대화 실행 (모델 선택 프롬프트)
+  clco serve           어댑터 서버만 기동
+  clco login|auth      GitHub (재)인증
+  clco logout          저장된 토큰 삭제
+  clco update          최신 버전으로 갱신
+  clco --port N        어댑터 포트 고정
+  clco help            도움말
+
+claude 인자는 -- 뒤에:  clco -- -p "질문"  /  clco -- --model luna-5.6`
+
+function parseArgs(rawArgv: string[]): Args {
+  // The launcher replaces a leading "--" with this sentinel because bun
+  // strips the bare separator before scripts ever see it.
+  const argv =
+    rawArgv[0] === "__clco_passthrough__"
+      ? rawArgv
+      : rawArgv
   const sep = argv.indexOf("--")
   const leading = sep === -1 ? argv : argv.slice(0, sep)
   const trailing = sep === -1 ? [] : argv.slice(sep + 1)
@@ -71,16 +88,20 @@ function parseArgs(argv: string[]): Args {
       const raw = leading[i + 1]
       const n = Number(raw)
       if (raw === undefined || !Number.isInteger(n) || n <= 0) {
-        throw new Error("--port 에는 1 이상의 정수가 필요합니다")
+        throw new Error(`--port 에는 1 이상의 정수가 필요합니다\n\n${COMMAND_LIST}`)
       }
       port = n
       i += 2
       continue
     }
-    break
+    if (arg === "__clco_passthrough__") {
+      return { command, port, claudeArgs: [...leading.slice(i + 1), ...trailing] }
+    }
+    throw new Error(
+      `알 수 없는 인자: "${arg}"\n(claude 인자는 -- 뒤에 넣으세요: clco -- ${leading.slice(i).join(" ")})\n\n${COMMAND_LIST}`,
+    )
   }
-  // Anything we didn't consume — before or after `--` — belongs to claude.
-  return { command, port, claudeArgs: [...leading.slice(i), ...trailing] }
+  return { command, port, claudeArgs: trailing }
 }
 
 const interactive = process.stdout.isTTY === true

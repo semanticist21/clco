@@ -51,6 +51,12 @@ cat > "$BIN_DIR/clco" <<LAUNCHER
 # clco launcher (installed by install.sh)
 CLCO_APP_DIR="$CLCO_DIR"
 export CLCO_APP_DIR
+# bun strips a leading "--" before scripts see it — translate it into a
+# sentinel that cli.ts understands as "everything after is claude's".
+if [ "\$1" = "--" ]; then
+  shift
+  set -- "__clco_passthrough__" "\$@"
+fi
 exec "$BUN_BIN" run "$CLCO_DIR/src/cli.ts" "\$@"
 LAUNCHER
 chmod +x "$BIN_DIR/clco"

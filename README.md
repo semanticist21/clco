@@ -32,6 +32,8 @@ curl -fsSL https://raw.githubusercontent.com/semanticist21/clco/main/install.sh 
 ```sh
 clco                      # 최초 1회 GitHub 로그인(device flow) → 모델 선택 → claude 실행
 clco -- -p "질문"         # `--` 뒤 인자는 claude에 그대로 전달 (선택 프롬프트 생략)
+clco login / logout       # 인증 갱신 / 토큰 삭제
+clco update               # 최신 버전으로 갱신
 clco serve                # 어댑터 서버만 기동
 clco login                # GitHub (재)인증 — 계정 전환도 이걸로
 clco logout               # 저장된 토큰 삭제 (마지막 모델 선택은 유지)
@@ -43,6 +45,7 @@ clco help
 - **모델**: 시작할 때 Copilot이 제공하는 전체 모델에서 검색해서 고릅니다. 마지막 선택은 기본값으로 기억됩니다.
   세션 중 전환은 claude 안에서 `/model`. 고정하려면 `clco -- --model luna-5.6` 또는 `CLCO_SONNET=luna-5.6 clco`
   (슬롯 오버라이드: `CLCO_OPUS` / `CLCO_SONNET` / `CLCO_HAIKU` / `CLCO_FABLE`)
+- **오타 방지**: `--` 앞의 모르는 인자는 에러 + 명령어 리스트를 표시합니다
 - **로그인**: 토큰은 `~/.config/clco/auth.json`(600)에 1회 저장. 만료되면 안내에 따라 `clco auth`
 - **debug**: `CLCO_DEBUG=1 clco` — 어댑터 요청 로그가 `~/.config/clco/adapter.log`에 쌓임
 
