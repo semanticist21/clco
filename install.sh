@@ -43,6 +43,30 @@ log "의존성 설치 (bun install)"
   || (cd "$CLCO_DIR" && bun install >/dev/null 2>&1) \
   || { log "bun install 실패 — 상세 출력:"; (cd "$CLCO_DIR" && bun install) || fail "bun install 실패"; }
 
+# --- claude CLI (required by clco; offer to install) -------------------------
+CLAUDE_WARN="나중에 설치: curl -fsSL https://claude.ai/install.sh | bash"
+if command -v claude >/dev/null 2>&1; then
+  log "claude CLI 확인"
+else
+  log "claude CLI가 없습니다 (clco 실행에 필수)"
+  INSTALL_CLAUDE=n
+  if [ -e /dev/tty ]; then
+    printf '지금 설치할까요? [y/N] '
+    answer=n
+    read -r answer < /dev/tty || answer=n
+    case "$answer" in y|Y|yes|Yes) INSTALL_CLAUDE=y ;; esac
+  fi
+  if [ "$INSTALL_CLAUDE" = y ]; then
+    log "claude CLI 설치 중 (공식 설치 스크립트)"
+    curl -fsSL https://claude.ai/install.sh | bash
+    export PATH="$HOME/.local/bin:$PATH"
+    command -v claude >/dev/null 2>&1 \
+      || log "⚠ claude 설치 확인 실패 — 터미널을 다시 열고 확인하세요. $CLAUDE_WARN"
+  else
+    log "⚠ 건너뜀 — clco 실행 전에 claude CLI가 필요합니다. $CLAUDE_WARN"
+  fi
+fi
+
 # --- Launcher ----------------------------------------------------------------
 mkdir -p "$BIN_DIR"
 BUN_BIN="$(command -v bun)"
@@ -61,7 +85,7 @@ exec "$BUN_BIN" run "$CLCO_DIR/src/cli.ts" "\$@"
 LAUNCHER
 chmod +x "$BIN_DIR/clco"
 
-command -v claude >/dev/null 2>&1 || log "⚠ claude CLI가 없습니다 — https://claude.com/claude-code 에서 먼저 설치하세요 (clco 실행에 필요)"
+
 
 case ":$PATH:" in
   *":$BIN_DIR:"*) ;;

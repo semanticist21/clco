@@ -17,6 +17,7 @@ clco
 - The [claude CLI](https://claude.com/claude-code) on your PATH
 - A GitHub account with an active Copilot subscription
 - [Bun](https://bun.sh) — installed automatically by the install script if missing
+- The claude CLI itself is not bundled: the installer offers to install it (y/N prompt), or install it beforehand
 
 ## Install
 
