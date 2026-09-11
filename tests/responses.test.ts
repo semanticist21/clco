@@ -2,7 +2,11 @@
 // (GPT-5.x "luna" family) must work transparently, both streaming and not.
 
 import { describe, expect, test } from "bun:test"
-import { toResponsesRequest, ResponsesEventAdapter, responsesToOpenAIResponse } from "../src/responses"
+import {
+  toResponsesRequest,
+  ResponsesEventAdapter,
+  responsesToOpenAIResponse,
+} from "../src/responses"
 
 describe("toResponsesRequest", () => {
   test("system -> instructions; tool rounds -> function_call / function_call_output", () => {
@@ -88,6 +92,105 @@ describe("ResponsesEventAdapter", () => {
       response: { error: { message: "quota exhausted" } },
     })
     expect(failed?.error?.message).toBe("quota exhausted")
+  })
+
+  test("images in tool_result become a placeholder + adjacent input_image user item", () => {
+    const out = toResponsesRequest({
+      model: "gpt-5.6-luna",
+      max_tokens: 32,
+      messages: [
+        {
+          role: "user",
+          content: [
+            {
+              type: "tool_result",
+              tool_use_id: "t1",
+              content: [
+                { type: "text", text: "shot:" },
+                { type: "image", source: { type: "base64", media_type: "image/png", data: "AAAA" } },
+              ],
+            },
+            { type: "text", text: "what is it?" },
+          ],
+        },
+      ],
+    })
+    // function_call_output keeps string text with a placeholder,
+    // images ride on the adjacent user item as input_image parts.
+    expect(out.input[0]).toEqual({
+      type: "function_call_output",
+      call_id: "t1",
+      output: "shot:\n\n[이미지 1개 — 다음 사용자 메시지에 첨부됨]",
+    })
+    expect(out.input[1]).toEqual({
+      role: "user",
+      content: [
+        { type: "input_image", image_url: "data:image/png;base64,AAAA" },
+        { type: "input_text", text: "what is it?" },
+      ],
+    })
+  })
+
+  test(".done events rescue streams whose deltas were lost", () => {
+    const adapter = new ResponsesEventAdapter()
+    // Tool args: header arrives, delta is lost, .done carries the full JSON.
+    adapter.pushEvent({
+      type: "response.output_item.added",
+      item: { type: "function_call", call_id: "c1", id: "fc_1", name: "Read" },
+    })
+    const done = adapter.pushEvent({
+      type: "response.function_call_arguments.done",
+      item_id: "fc_1",
+      arguments: '{"file_path":"/x"}',
+    })!
+    expect(done.choices?.[0]?.delta?.tool_calls?.[0]?.function?.arguments).toBe(
+      '{"file_path":"/x"}',
+    )
+    // When deltas DID arrive, .done emits nothing (no duplication).
+    const adapter2 = new ResponsesEventAdapter()
+    adapter2.pushEvent({
+      type: "response.output_item.added",
+      item: { type: "function_call", call_id: "c2", id: "fc_2", name: "Read" },
+    })
+    adapter2.pushEvent({
+      type: "response.function_call_arguments.delta",
+      item_id: "fc_2",
+      delta: '{"file"',
+    })
+    expect(
+      adapter2.pushEvent({
+        type: "response.function_call_arguments.done",
+        item_id: "fc_2",
+        arguments: '{"file_path":"/x"}',
+      }),
+    ).toBeNull()
+    // Text .done fallback when the delta never arrived.
+    const adapter3 = new ResponsesEventAdapter()
+    const textDone = adapter3.pushEvent({
+      type: "response.output_text.done",
+      item_id: "msg_1",
+      text: "lost-and-found",
+    })!
+    expect(textDone.choices?.[0]?.delta?.content).toBe("lost-and-found")
+  })
+
+  test("completed usage maps cached_tokens into prompt_tokens_details", () => {
+    const adapter = new ResponsesEventAdapter()
+    const done = adapter.pushEvent({
+      type: "response.completed",
+      response: {
+        usage: {
+          input_tokens: 10,
+          output_tokens: 2,
+          input_tokens_details: { cached_tokens: 4 },
+        },
+      },
+    })!
+    expect(done.usage).toEqual({
+      prompt_tokens: 10,
+      completion_tokens: 2,
+      prompt_tokens_details: { cached_tokens: 4 },
+    })
   })
 
   test("responsesToOpenAIResponse flattens message and function_call output items", () => {

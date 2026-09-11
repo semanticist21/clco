@@ -4,7 +4,7 @@
 // claude launched with injected settings.
 
 import * as p from "@clack/prompts"
-import { existsSync } from "node:fs"
+import { existsSync, mkdirSync } from "node:fs"
 import { appendFile } from "node:fs/promises"
 import { homedir } from "node:os"
 import { join } from "node:path"
@@ -129,6 +129,17 @@ async function runUpdate(): Promise<void> {
     )
   }
   console.error(`… 업데이트: ${dir}`)
+  // Pre-rename clones carry a stale origin — retarget before pulling.
+  const CANONICAL = "https://github.com/semanticist21/clco.git"
+  const remote = Bun.spawnSync(["git", "-C", dir, "remote", "get-url", "origin"], {
+    stdout: "pipe",
+    stderr: "pipe",
+  })
+  const url = remote.stdout.toString().trim()
+  if (remote.exitCode === 0 && url && !url.endsWith("semanticist21/clco.git")) {
+    console.error(`… origin 재지정: ${url} → ${CANONICAL}`)
+    Bun.spawnSync(["git", "-C", dir, "remote", "set-url", "origin", CANONICAL])
+  }
   const pull = Bun.spawnSync(["git", "-C", dir, "pull", "--ff-only"], {
     stdout: "pipe",
     stderr: "pipe",
@@ -256,7 +267,11 @@ async function main(): Promise<void> {
       process.exit(0)
     }
     defaultModel = selected as string
-    await savePrefs({ last_model: defaultModel })
+    try {
+      await savePrefs({ last_model: defaultModel })
+    } catch {
+      console.error("[clco] ⚠ 모델 선택 저장 실패 (설정 디렉토리 권한 확인)")
+    }
   }
 
   const server = await startServer({ port: args.port })
@@ -264,7 +279,9 @@ async function main(): Promise<void> {
     // claude's TUI owns the terminal; adapter request logs must not paint
     // over it. Debug mode appends them to a file instead.
     if (process.env.CLCO_DEBUG) {
-      const logPath = `${homedir()}/.config/clco/adapter.log`
+      const logDir = join(homedir(), ".config", "clco")
+      mkdirSync(logDir, { recursive: true })
+      const logPath = join(logDir, "adapter.log")
       setAdapterLogSink((line) => {
         void appendFile(logPath, `${line}\n`).catch(() => {})
       })

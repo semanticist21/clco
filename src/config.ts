@@ -33,7 +33,8 @@ async function migrateFromClcopilot(): Promise<void> {
   if (migrated) return
   migrated = true
   const legacyDir = join(homedir(), ".config", "clcopilot")
-  await mkdir(authDir(), { recursive: true }).catch(() => {})
+  await mkdir(authDir(), { recursive: true, mode: 0o700 }).catch(() => {})
+  await chmod(authDir(), 0o700).catch(() => {})
   for (const name of ["auth.json", "prefs.json"]) {
     const target = join(authDir(), name)
     try {
@@ -106,9 +107,12 @@ export async function savePrefs(prefs: Prefs): Promise<void> {
   await mkdir(authDir(), { recursive: true })
   await writeFile(prefsPath(), JSON.stringify(prefs, null, 2) + "\n", {
     mode: 0o600,
-  }).catch(() => {})
+  })
 }
 
 export async function clearAuth(): Promise<void> {
+  // Also remove the legacy copy — otherwise migrateFromClcopilot resurrects
+  // the old token on the next run (logout would be a no-op).
   await rm(authPath()).catch(() => {})
+  await rm(join(homedir(), ".config", "clcopilot", "auth.json")).catch(() => {})
 }

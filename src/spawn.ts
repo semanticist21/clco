@@ -62,7 +62,7 @@ export async function resolveClaude(): Promise<string> {
 let currentChild: Bun.Subprocess<"inherit", "inherit", "inherit"> | null = null
 let escalateTimer: ReturnType<typeof setTimeout> | undefined
 process.on("SIGTERM", () => {
-  if (!currentChild) return
+  if (!currentChild) process.exit(143) // serve mode: no child to forward to
   try {
     currentChild.kill("SIGTERM")
   } catch {
@@ -81,8 +81,9 @@ process.on("SIGTERM", () => {
 // Put every model the upstream offers into /model directly, with its own
 // label. Claude's gateway-discovery filter only keeps ids containing
 // "claude"/"anthropic", but a modelPicker lineup accepts any id verbatim.
-function buildModelPicker(): { options: Array<{ model: string; label?: string; description?: string }>; replaceBuiltInOptions: boolean } | null {
-  const list = upstreamModels()
+export function buildModelPickerFrom(
+  list: Array<{ id: string; name: string }>,
+): { options: Array<{ model: string; label?: string; description?: string }>; replaceBuiltInOptions: boolean } | null {
   if (list.length === 0) return null
   return {
     options: list.slice(0, 200).map((m) =>
@@ -92,6 +93,10 @@ function buildModelPicker(): { options: Array<{ model: string; label?: string; d
     ),
     replaceBuiltInOptions: false,
   }
+}
+
+function buildModelPicker() {
+  return buildModelPickerFrom(upstreamModels())
 }
 
 export async function runClaude(opts: {

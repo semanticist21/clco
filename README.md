@@ -33,12 +33,16 @@ curl -fsSL https://raw.githubusercontent.com/semanticist21/clco/main/install.sh 
 clco                      # 최초 1회 GitHub 로그인(device flow) → 모델 선택 → claude 실행
 clco -- -p "질문"         # `--` 뒤 인자는 claude에 그대로 전달 (선택 프롬프트 생략)
 clco serve                # 어댑터 서버만 기동
-clco auth                 # GitHub 재인증
+clco login                # GitHub (재)인증 — 계정 전환도 이걸로
+clco logout               # 저장된 토큰 삭제 (마지막 모델 선택은 유지)
+clco update               # 최신 버전으로 갱신 (git pull + 의존성)
+clco auth                 # clco login의 별칭
 clco help
 ```
 
 - **모델**: 시작할 때 Copilot이 제공하는 전체 모델에서 검색해서 고릅니다. 마지막 선택은 기본값으로 기억됩니다.
   세션 중 전환은 claude 안에서 `/model`. 고정하려면 `clco -- --model luna-5.6` 또는 `CLCO_SONNET=luna-5.6 clco`
+  (슬롯 오버라이드: `CLCO_OPUS` / `CLCO_SONNET` / `CLCO_HAIKU` / `CLCO_FABLE`)
 - **로그인**: 토큰은 `~/.config/clco/auth.json`(600)에 1회 저장. 만료되면 안내에 따라 `clco auth`
 - **debug**: `CLCO_DEBUG=1 clco` — 어댑터 요청 로그가 `~/.config/clco/adapter.log`에 쌓임
 
@@ -70,4 +74,5 @@ CLCO_UPSTREAM=http://127.0.0.1:9099 bun run scripts/mock-upstream.ts  # 목업 u
 ## 주의
 
 - Copilot을 공식 클라이언트 외 경로로 쓰는 것은 GitHub 약관 회색지대입니다. 남용 시 계정 플래그 위험이 있고, Claude 모델 사용은 premium request quota를 소모합니다. 개인 사용 권장.
-- thinking(확장 사고)은 미지원입니다.
+- thinking(확장 사고)은 미지원입니다. Responses API 전용 모델(luna 등 GPT-5.x)에서는 `stop_sequences`가 적용되지 않습니다.
+- 라이선스: [MIT](LICENSE)

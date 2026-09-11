@@ -362,10 +362,26 @@ async function handleMessages(
     let data: OpenAIResponse
     try {
       const raw = (await res.json()) as unknown
-      data =
-        result.dialect === "responses"
-          ? responsesToOpenAIResponse(raw as Record<string, unknown>)
-          : (raw as OpenAIResponse)
+      if (result.dialect === "responses") {
+        const body = raw as {
+          error?: unknown
+          status?: string
+        }
+        // An in-band failure body must not convert into an empty
+        // "successful" assistant message.
+        if (body?.error || body?.status === "failed") {
+          logLine(
+            `[${timestamp()}]   -> responses error body (${Date.now() - started}ms)`,
+          )
+          return anthropicError(
+            502,
+            `upstream error: ${JSON.stringify(body.error ?? body.status).slice(0, 300)}`,
+          )
+        }
+        data = responsesToOpenAIResponse(raw as Record<string, unknown>)
+      } else {
+        data = raw as OpenAIResponse
+      }
     } catch {
       // A 200 with a non-JSON body (proxy page, HTML error) is an upstream
       // failure, not a client error — must be terminal 502, not a retryable
@@ -430,12 +446,12 @@ async function handle(
 
   if (path !== "/v1/messages" && path !== "/v1/messages/count_tokens") {
     if (req.method === "GET" && path === "/v1/models") {
+      const denied = authorize(req, selfHost)
+      if (denied) return denied
       // Gateway model discovery (CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY):
       // serve the list captured at startup — Claude Code aborts discovery
       // after 3 seconds, so a live upstream fetch would silently fail.
       logLine(`[${timestamp()}] GET /v1/models`)
-      const denied = authorize(req, selfHost)
-      if (denied) return denied
       const entries = upstreamModels()
       if (entries.length === 0) {
         return anthropicError(502, "model list unavailable (discovery failed at startup)")

@@ -23,6 +23,14 @@ fi
 # --- Source ------------------------------------------------------------------
 if [ -d "$CLCO_DIR/.git" ]; then
   log "기존 설치 업데이트: $CLCO_DIR"
+  # Pre-rename clones carry a stale origin — retarget before pulling.
+  CURRENT_URL="$(git -C "$CLCO_DIR" remote get-url origin 2>/dev/null || true)"
+  case "$CURRENT_URL" in
+    *semanticist21/clco.git) ;;
+    https://*|git@github.com:*)
+      [ -n "$CURRENT_URL" ] && git -C "$CLCO_DIR" remote set-url origin "$REPO"
+      ;;
+  esac
   git -C "$CLCO_DIR" pull --ff-only >/dev/null 2>&1 || fail "업데이트 실패 — $CLCO_DIR에서 git pull을 직접 확인해 주세요"
 else
   [ -e "$CLCO_DIR" ] && fail "$CLCO_DIR 가 이미 있고 git 저장소가 아닙니다 — 지우고 재실행하세요"
@@ -33,16 +41,21 @@ fi
 log "의존성 설치 (bun install)"
 (cd "$CLCO_DIR" && bun install --frozen-lockfile >/dev/null 2>&1) \
   || (cd "$CLCO_DIR" && bun install >/dev/null 2>&1) \
-  || fail "bun install 실패"
+  || { log "bun install 실패 — 상세 출력:"; (cd "$CLCO_DIR" && bun install) || fail "bun install 실패"; }
 
 # --- Launcher ----------------------------------------------------------------
 mkdir -p "$BIN_DIR"
+BUN_BIN="$(command -v bun)"
 cat > "$BIN_DIR/clco" <<LAUNCHER
 #!/bin/sh
 # clco launcher (installed by install.sh)
-exec bun run "$CLCO_DIR/src/cli.ts" "\$@"
+CLCO_APP_DIR="$CLCO_DIR"
+export CLCO_APP_DIR
+exec "$BUN_BIN" run "$CLCO_DIR/src/cli.ts" "\$@"
 LAUNCHER
 chmod +x "$BIN_DIR/clco"
+
+command -v claude >/dev/null 2>&1 || log "⚠ claude CLI가 없습니다 — https://claude.com/claude-code 에서 먼저 설치하세요 (clco 실행에 필요)"
 
 case ":$PATH:" in
   *":$BIN_DIR:"*) ;;

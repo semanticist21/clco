@@ -8,10 +8,16 @@ CLCO_DIR="${CLCO_DIR:-$HOME/.local/share/clco}"
 BIN_DIR="${BIN_DIR:-$HOME/.local/bin}"
 
 log() { printf '\033[1;36m==>\033[0m %s\n' "$*"; }
+fail() { printf '\033[1;31m오류:\033[0m %s\n' "$*" >&2; exit 1; }
 
 removed=0
 if [ -f "$BIN_DIR/clco" ]; then rm -f "$BIN_DIR/clco"; log "제거: $BIN_DIR/clco"; removed=1; fi
-if [ -d "$CLCO_DIR" ]; then rm -rf "$CLCO_DIR"; log "제거: $CLCO_DIR"; removed=1; fi
+if [ -d "$CLCO_DIR" ]; then
+  if [ ! -d "$CLCO_DIR/.git" ]; then
+    fail "$CLCO_DIR 가 clco 설치(git 저장소)가 아닙니다 — 안전을 위해 직접 확인 후 삭제하세요"
+  fi
+  rm -rf "$CLCO_DIR"; log "제거: $CLCO_DIR"; removed=1
+fi
 
 if [ "${1:-}" = "--full" ]; then
   if [ -d "$HOME/.config/clco" ]; then

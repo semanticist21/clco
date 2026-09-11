@@ -48,6 +48,13 @@ export function toResponsesRequest(payload: AnthropicRequest): ResponsesRequest 
 
     // Tool results must land in the same order as the conversation.
     const rest: Array<Record<string, unknown>> = []
+    const pendingImages: Array<Record<string, unknown>> = []
+    const flushImages = () => {
+      if (pendingImages.length > 0) {
+        input.push({ role: "user", content: [...pendingImages] })
+        pendingImages.length = 0
+      }
+    }
     for (const block of message.content) {
       if (block.type === "tool_result") {
         // Flush pending user content before the tool output to preserve
@@ -56,17 +63,36 @@ export function toResponsesRequest(payload: AnthropicRequest): ResponsesRequest 
           input.push({ role: "user", content: [...rest] })
           rest.length = 0
         }
-        const text =
-          typeof block.content === "string"
-            ? block.content
-            : (block.content ?? [])
-                .filter((b) => b.type === "text" || b.type === "thinking")
-                .map((b) => (b.type === "text" ? b.text : b.thinking))
-                .join("\n\n")
+        let text: string
+        const images: Array<Record<string, unknown>> = []
+        if (typeof block.content === "string") {
+          text = block.content
+        } else if (Array.isArray(block.content)) {
+          const texts: string[] = []
+          for (const b of block.content) {
+            if (b.type === "text") texts.push(b.text)
+            else if (b.type === "thinking") texts.push(b.thinking)
+            else if (b.type === "image")
+              images.push({
+                type: "input_image",
+                image_url: `data:${b.source.media_type};base64,${b.source.data}`,
+              })
+          }
+          text = texts.join("\n\n")
+        } else {
+          text = ""
+        }
+        if (block.is_error) text = `[error] ${text}`
+        if (images.length > 0) {
+          text =
+            (text ? `${text}\n\n` : "") +
+            `[이미지 ${images.length}개 — 다음 사용자 메시지에 첨부됨]`
+          pendingImages.push(...images)
+        }
         input.push({
           type: "function_call_output",
           call_id: block.tool_use_id,
-          output: block.is_error ? `[error] ${text}` : text,
+          output: text,
         })
         continue
       }
@@ -95,8 +121,14 @@ export function toResponsesRequest(payload: AnthropicRequest): ResponsesRequest 
         })
       }
     }
-    if (rest.length > 0) {
-      input.push({ role: message.role, content: rest })
+    if (pendingImages.length > 0 || rest.length > 0) {
+      // Merge pending tool-result images with trailing text into ONE user
+      // message (mirrors the chat dialect's adjacent-user-message layout).
+      input.push({
+        role: message.role,
+        content: [...pendingImages, ...rest],
+      })
+      pendingImages.length = 0
     }
   }
 
@@ -137,6 +169,8 @@ export function toResponsesRequest(payload: AnthropicRequest): ResponsesRequest 
 
 export class ResponsesEventAdapter {
   private toolIndexes = new Map<string, number>()
+  private argsAccum = new Map<string, string>()
+  private textAccum = new Map<string, string>()
   private nextIndex = 0
   private sawToolCall = false
 
@@ -148,11 +182,28 @@ export class ResponsesEventAdapter {
     if (type === "response.output_text.delta") {
       const delta = event.delta as string | undefined
       if (!delta) return null
+      const key = String(event.item_id ?? "r")
+      this.textAccum.set(key, (this.textAccum.get(key) ?? "") + delta)
       return {
-        id: String(event.item_id ?? "r"),
+        id: key,
         model: "",
         choices: [{ index: 0, finish_reason: null, delta: { content: delta } }],
       }
+    }
+
+    if (type === "response.output_text.done") {
+      // Authoritative fallback: if no delta arrived for this item, emit the
+      // full text so a lost stream cannot silently become an empty message.
+      const key = String(event.item_id ?? "r")
+      const full = (event.text as string | undefined) ?? ""
+      if (full && !(this.textAccum.get(key) ?? "")) {
+        return {
+          id: key,
+          model: "",
+          choices: [{ index: 0, finish_reason: null, delta: { content: full } }],
+        }
+      }
+      return null
     }
 
     if (type === "response.output_item.added") {
@@ -190,10 +241,12 @@ export class ResponsesEventAdapter {
     if (type === "response.function_call_arguments.delta") {
       const delta = event.delta as string | undefined
       if (!delta) return null
-      const index = this.toolIndexes.get(String(event.item_id ?? ""))
+      const key = String(event.item_id ?? "")
+      const index = this.toolIndexes.get(key)
       if (index === undefined) return null
+      this.argsAccum.set(key, (this.argsAccum.get(key) ?? "") + delta)
       return {
-        id: String(event.item_id ?? "r"),
+        id: key,
         model: "",
         choices: [
           {
@@ -207,11 +260,41 @@ export class ResponsesEventAdapter {
       }
     }
 
+    if (type === "response.function_call_arguments.done") {
+      const key = String(event.item_id ?? "")
+      const index = this.toolIndexes.get(key)
+      if (index === undefined) return null
+      const full = (event.arguments as string | undefined) ?? ""
+      if (full && !(this.argsAccum.get(key) ?? "")) {
+        return {
+          id: key,
+          model: "",
+          choices: [
+            {
+              index: 0,
+              finish_reason: null,
+              delta: {
+                tool_calls: [{ index, function: { arguments: full } }],
+              },
+            },
+          ],
+        }
+      }
+      return null
+    }
+
     if (type === "response.completed" || type === "response.incomplete") {
       const response = event.response as
-        | { usage?: { input_tokens?: number; output_tokens?: number } }
+        | {
+            usage?: {
+              input_tokens?: number
+              output_tokens?: number
+              input_tokens_details?: { cached_tokens?: number }
+            }
+          }
         | undefined
       const usage = response?.usage
+      const cached = usage?.input_tokens_details?.cached_tokens
       return {
         id: "r",
         model: "",
@@ -226,6 +309,9 @@ export class ResponsesEventAdapter {
           ? {
               prompt_tokens: usage.input_tokens,
               completion_tokens: usage.output_tokens,
+              ...(cached !== undefined && {
+                prompt_tokens_details: { cached_tokens: cached },
+              }),
             }
           : undefined,
       }
@@ -291,7 +377,11 @@ export function responsesToOpenAIResponse(
     }
   }
   const usage = body.usage as
-    | { input_tokens?: number; output_tokens?: number }
+    | {
+        input_tokens?: number
+        output_tokens?: number
+        input_tokens_details?: { cached_tokens?: number }
+      }
     | undefined
   return {
     id: String(body.id ?? "r"),
@@ -311,6 +401,11 @@ export function responsesToOpenAIResponse(
       ? {
           prompt_tokens: usage.input_tokens,
           completion_tokens: usage.output_tokens,
+          ...(usage.input_tokens_details?.cached_tokens !== undefined && {
+            prompt_tokens_details: {
+              cached_tokens: usage.input_tokens_details.cached_tokens,
+            },
+          }),
         }
       : undefined,
   }
