@@ -53,7 +53,10 @@ export function buildSettingsEnv(
   return {
     ANTHROPIC_BASE_URL: baseUrl,
     ANTHROPIC_AUTH_TOKEN: "clco-local",
-    ANTHROPIC_MODEL: selected,
+    // ANTHROPIC_MODEL is deliberately NOT set: it pins the session model, so
+    // claude reports "ANTHROPIC_MODEL is set to X — new sessions use that
+    // while it is set" and every /model switch becomes cosmetic. The startup
+    // choice travels as `--model` instead, which /model can override.
     ANTHROPIC_DEFAULT_OPUS_MODEL: models.opus,
     ANTHROPIC_DEFAULT_SONNET_MODEL: models.sonnet,
     ANTHROPIC_DEFAULT_HAIKU_MODEL: models.haiku,
@@ -88,12 +91,33 @@ const USER_SETTINGS = join(homedir(), ".claude", "settings.json")
 interface ModelSnapshot {
   existed: boolean
   model?: unknown
+  /** True when the snapshot itself looks like a leftover from a clco run. */
+  contaminated?: boolean
 }
 
-export async function snapshotUserModel(path: string): Promise<ModelSnapshot> {
+// A value that only a clco session could have written. If the snapshot holds
+// one, an earlier run died before restoring; treating it as the baseline
+// would make this run "restore" the contamination and lose the real setting
+// for good, so refuse to adopt it.
+function looksLikeCopilotSlug(value: unknown, upstream: UpstreamModel[]): boolean {
+  if (typeof value !== "string") return false
+  const bare = value.replace(/\[[^\]]*\]$/, "")
+  return upstream.some(
+    (m) => m.id === bare || advertisedId(m.id) === bare,
+  )
+}
+
+export async function snapshotUserModel(
+  path: string,
+  upstream: UpstreamModel[] = upstreamModels(),
+): Promise<ModelSnapshot> {
   try {
     const parsed = JSON.parse(await readFile(path, "utf8")) as Record<string, unknown>
-    return { existed: true, model: parsed.model }
+    return {
+      existed: true,
+      model: parsed.model,
+      contaminated: looksLikeCopilotSlug(parsed.model, upstream),
+    }
   } catch {
     return { existed: false }
   }
@@ -104,16 +128,33 @@ export async function restoreUserModel(
   path: string,
   before: ModelSnapshot,
 ): Promise<boolean> {
-  if (!before.existed) return false
   let parsed: Record<string, unknown>
+  let raw: string
   try {
-    parsed = JSON.parse(await readFile(path, "utf8")) as Record<string, unknown>
+    raw = await readFile(path, "utf8")
+    parsed = JSON.parse(raw) as Record<string, unknown>
   } catch {
+    // The file is gone, or is JSONC that claude tolerates and JSON.parse does
+    // not. Either way a blind rewrite would destroy it — leave it alone.
     return false
   }
+  // claude created the file during the session: drop the key it added, and
+  // the whole file if that was all it held.
+  if (!before.existed) {
+    if (parsed.model === undefined) return false
+    delete parsed.model
+    return writeSettings(path, parsed)
+  }
   if (parsed.model === before.model) return false
-  if (before.model === undefined) delete parsed.model
+  if (before.model === undefined || before.contaminated) delete parsed.model
   else parsed.model = before.model
+  return writeSettings(path, parsed)
+}
+
+async function writeSettings(
+  path: string,
+  parsed: Record<string, unknown>,
+): Promise<boolean> {
   try {
     await writeFile(path, JSON.stringify(parsed, null, 2) + "\n")
     return true
@@ -143,10 +184,21 @@ export async function resolveClaude(): Promise<string> {
 // newer run.
 let currentChild: Bun.Subprocess<"inherit", "inherit", "inherit"> | null = null
 let escalateTimer: ReturnType<typeof setTimeout> | undefined
-process.on("SIGTERM", () => {
-  if (!currentChild) process.exit(143) // serve mode: no child to forward to
+// Set while a child is running so a signal path can undo a /model write even
+// when it never reaches the normal exit below. Without this an abrupt exit
+// strands a Copilot slug in the user's settings, and the NEXT run snapshots
+// that as its baseline — losing the real setting permanently.
+let pendingRestore: ModelSnapshot | null = null
+
+async function shutdown(signal: NodeJS.Signals, code: number): Promise<void> {
+  if (pendingRestore) {
+    const snapshot = pendingRestore
+    pendingRestore = null
+    await restoreUserModel(USER_SETTINGS, snapshot).catch(() => false)
+  }
+  if (!currentChild) process.exit(code) // serve mode: no child to forward to
   try {
-    currentChild.kill("SIGTERM")
+    currentChild.kill(signal)
   } catch {
     // already exited
   }
@@ -156,9 +208,16 @@ process.on("SIGTERM", () => {
     } catch {
       // already exited
     }
-    process.exit(143)
+    process.exit(code)
   }, 5000)
-})
+}
+
+process.on("SIGTERM", () => void shutdown("SIGTERM", 143))
+process.on("SIGHUP", () => void shutdown("SIGHUP", 129))
+// SIGINT normally never fires while claude holds the tty in raw mode — it
+// receives \x03 as input instead — but `kill -INT` and non-TTY runs do reach
+// here, and those are exactly the cases the normal exit path misses.
+process.on("SIGINT", () => void shutdown("SIGINT", 130))
 
 // Claude Code's /model lineup. The picker row shape is the one the binary
 // validates against: { model, label?, description?, behavesAs? }, plus a
@@ -219,13 +278,20 @@ export function buildModelPickerFrom(
     // binary. Claim it only where the model genuinely exceeds the default
     // ceiling — overclaiming a small model is the dangerous direction.
     const suffix = (ctx ?? 0) > DEFAULT_WINDOW_CEILING ? "[1m]" : ""
-    const parts = [`Copilot · ${routeOf(m)}`]
+    // Several slugs share one display name (five are "GPT-4o", two are
+    // "GPT-5.6 Luna"), so the subtitle leads with the id: it tells the rows
+    // apart without cluttering every title with a parenthetical.
+    const parts = [m.id, routeOf(m)]
     if (ctx) parts.push(`${Math.round(ctx / 1000)}k`)
+    // Claude offers effort tiers to any row with behavesAs; say so where the
+    // upstream model will just ignore them.
     if (!m.efforts) parts.push("effort 없음")
-    // The session's auto-compact budget is fixed at launch, so a row on a
-    // different tier will not get its true window until clco restarts.
-    if (ctx && opts?.sessionWindow && ctx !== opts.sessionWindow) {
-      parts.push("⚠세션 한도 다름")
+    // Only the shrinking direction is a hazard: the session's auto-compact
+    // budget is fixed at launch, so a smaller model can sail past its real
+    // limit. A larger one merely leaves headroom unused. Warning on both
+    // would mark nearly every row and stop meaning anything.
+    if (ctx && opts?.sessionWindow && ctx < opts.sessionWindow) {
+      parts.push(`⚠한도 ${Math.round(ctx / 1000)}k`)
     }
     options.push({
       model: (advertised ?? m.id) + suffix,
@@ -282,6 +348,7 @@ export async function runClaude(opts: {
 }): Promise<number> {
   const claude = await resolveClaude()
   const modelBefore = await snapshotUserModel(USER_SETTINGS)
+  pendingRestore = modelBefore
   const env = buildSettingsEnv(opts.baseUrl, opts.models, opts.defaultModel)
   const picker = buildModelPicker(
     opts.defaultModel ?? opts.models.sonnet,
@@ -301,8 +368,16 @@ export async function runClaude(opts: {
   // Never let a parent-exported key override the adapter routing.
   delete childEnv.ANTHROPIC_API_KEY
 
+  // Seed the session model without pinning it (see buildSettingsEnv). A
+  // --model the user passed themselves always wins.
+  const userPickedModel = opts.claudeArgs.some(
+    (a) => a === "--model" || a.startsWith("--model="),
+  )
+  const modelArgs =
+    userPickedModel || !opts.defaultModel ? [] : ["--model", opts.defaultModel]
+
   const proc = Bun.spawn(
-    [claude, "--settings", settings, ...opts.claudeArgs],
+    [claude, "--settings", settings, ...modelArgs, ...opts.claudeArgs],
     {
       stdio: ["inherit", "inherit", "inherit"],
       env: childEnv,
@@ -318,6 +393,7 @@ export async function runClaude(opts: {
       escalateTimer = undefined
     }
   }
+  pendingRestore = null
   if (await restoreUserModel(USER_SETTINGS, modelBefore)) {
     console.error(
       "[clco] /model 선택은 clco 세션에만 적용됩니다 — ~/.claude/settings.json의 model을 되돌렸습니다",

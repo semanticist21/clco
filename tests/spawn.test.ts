@@ -54,14 +54,14 @@ describe("buildModelPickerFrom", () => {
     // Native rows sort ahead of the rest.
     expect(picker.options[0]).toEqual({
       model: "claude-opus-5",
-      description: "Copilot · native · 200k",
+      description: "claude-opus-5 · native · 200k",
     })
     // A non-catalog id needs behavesAs or claude silently declines the row,
     // and the target must be a real catalog id — never a family alias.
     expect(picker.options[1]).toEqual({
       model: "gpt-5.6-luna[1m]",
       label: "Luna 5.6",
-      description: "Copilot · responses · 328k · effort 없음",
+      description: "gpt-5.6-luna · responses · 328k · effort 없음",
       behavesAs: "claude-opus-5",
     })
   })
@@ -161,7 +161,9 @@ describe("buildSettingsEnv", () => {
       maxPromptTokens: 200000,
       maxContextTokens: 264000,
     })
-    expect(env.ANTHROPIC_MODEL).toBe("mock-native")
+    // Pinning ANTHROPIC_MODEL makes every /model switch cosmetic — claude
+    // keeps using the pinned id and says so. The choice travels as --model.
+    expect(env.ANTHROPIC_MODEL).toBeUndefined()
     expect(env.CLAUDE_CODE_AUTO_COMPACT_WINDOW).toBe("200000")
     expect(env.CLAUDE_CODE_DISABLE_THINKING).toBeUndefined()
   })
@@ -223,5 +225,43 @@ describe("user settings protection", () => {
     expect(none.existed).toBe(false)
     expect(await restoreUserModel(missing, none)).toBe(false)
     expect(existsSync(missing)).toBe(false)
+  })
+})
+
+describe("duplicate display names", () => {
+  const m = (id: string, name: string) => ({
+    id,
+    name,
+    endpoints: ["/chat/completions"],
+    efforts: null,
+    maxPromptTokens: 200000,
+  })
+
+  // Titles stay clean; the subtitle's leading id is what tells them apart.
+  test("rows sharing a display name stay distinguishable", () => {
+    const picker = buildModelPickerFrom([
+      m("gpt-5.6-luna", "GPT-5.6 Luna"),
+      m("gpt-5.6-luna-free-auto", "GPT-5.6 Luna"),
+    ])!
+    expect(picker.options.map((o) => o.label)).toEqual([
+      "GPT-5.6 Luna",
+      "GPT-5.6 Luna",
+    ])
+    expect(picker.options[0]!.description).toStartWith("gpt-5.6-luna ·")
+    expect(picker.options[1]!.description).toStartWith("gpt-5.6-luna-free-auto ·")
+  })
+
+  test("the window warning marks only models smaller than the session budget", () => {
+    const picker = buildModelPickerFrom(
+      [m("small", "Small"), m("big", "Big")].map((x, i) => ({
+        ...x,
+        maxPromptTokens: i === 0 ? 12288 : 917504,
+      })),
+      { sessionWindow: 200000 },
+    )!
+    const by = (id: string) =>
+      picker.options.find((o) => o.description!.startsWith(id))!
+    expect(by("small").description).toContain("⚠한도 12k")
+    expect(by("big").description).not.toContain("⚠")
   })
 })
