@@ -1,0 +1,506 @@
+// Local Anthropic-compatible adapter server. Claude Code talks to this; it
+// translates and forwards to GitHub Copilot.
+
+import { copilotBaseUrl, copilotRequestHeaders, isMockMode } from "./api"
+import {
+  getCopilotToken,
+  invalidateCopilotToken,
+  upstreamModels,
+  type ModelMapping,
+} from "./token"
+import {
+  StreamTranslator,
+  estimateTokens,
+  translateRequest,
+  translateResponse,
+  type AnthropicRequest,
+  type OpenAIRequest,
+  type OpenAIResponse,
+  type StreamEventData,
+} from "./translate"
+import {
+  ResponsesEventAdapter,
+  responsesToOpenAIResponse,
+  toResponsesRequest,
+} from "./responses"
+
+export interface ServerHandle {
+  url: string
+  port: number
+  stop(): void
+}
+
+export interface ServerOptions {
+  port?: number
+  /** Override the Copilot base URL (tests inject a mock directly).
+   *  Implies mock-token mode: no GitHub exchange is attempted. */
+  upstream?: string
+}
+
+// Token injected into claude via ANTHROPIC_AUTH_TOKEN; requests without it
+// are rejected so stray local processes (or web pages doing no-cors POSTs)
+// cannot burn Copilot quota through the adapter.
+const LOCAL_TOKEN = "clco-local"
+
+const MAX_BODY_BYTES = 64 * 1024 * 1024
+
+const QUOTA_GUIDANCE =
+  "Copilot 월간 premium quota 초과 또는 구독 없음 — github.com/settings/copilot에서 확인하세요"
+
+function timestamp(): string {
+  return new Date().toTimeString().slice(0, 8)
+}
+
+// Request logs go to the terminal in serve mode; in run mode claude's TUI
+// owns stdout/stderr, so the sink is silenced (or redirected to a file
+// under CLCO_DEBUG) to keep the chat view clean.
+let logSink: ((line: string) => void) | null = (line) => console.log(line)
+
+export function setAdapterLogSink(
+  sink: ((line: string) => void) | null,
+): void {
+  logSink = sink
+}
+
+function logLine(line: string): void {
+  logSink?.(line)
+}
+
+function debug(...args: unknown[]): void {
+  if (process.env.CLCO_DEBUG) console.error("[clco:debug]", ...args)
+}
+
+function anthropicError(status: number, message: string): Response {
+  const type =
+    status === 401 || status === 403
+      ? "authentication_error"
+      : status === 429
+        ? "rate_limit_error"
+        : status === 404
+          ? "not_found_error"
+          : status === 400 || status === 402 || status === 413 || status === 422
+            ? "invalid_request_error" // terminal — Claude Code must not retry
+            : "api_error"
+  return Response.json(
+    { type: "error", error: { type, message } },
+    { status },
+  )
+}
+
+// Turn a raw upstream error body into an actionable message: known error
+// codes get guidance; the raw body is debug-gated to avoid leaking upstream
+// internals into terminals and pasted bug reports.
+function friendlyUpstreamError(bodyText: string): string {
+  try {
+    const parsed = JSON.parse(bodyText) as {
+      error?: { message?: string; code?: string | number }
+    }
+    const message = parsed?.error?.message
+    if (
+      parsed?.error?.code === "quota_exceeded" ||
+      (message && /quota/i.test(message))
+    ) {
+      return QUOTA_GUIDANCE
+    }
+    if (message) return message
+  } catch {
+    // not JSON — fall through
+  }
+  if (process.env.CLCO_DEBUG) {
+    return `upstream error: ${bodyText.slice(0, 500)}`
+  }
+  return "upstream error (set CLCO_DEBUG=1 for the raw body)"
+}
+
+function detectVision(payload: OpenAIRequest): boolean {
+  return payload.messages.some((m) =>
+    typeof m.content !== "string" && Array.isArray(m.content)
+      ? m.content.some((p) => p.type === "image_url")
+      : false,
+  )
+}
+
+// Models Copilot only serves through the Responses API (GPT-5.x "luna"
+// family etc.) — remembered after the first chat/completions rejection.
+const responsesOnlyModels = new Set<string>()
+
+type ChatResult =
+  | { ok: true; res: Response; dialect: "chat" | "responses" }
+  | { ok: false; status: number; message: string }
+
+async function copilotChat(
+  payload: OpenAIRequest,
+  anthropic: AnthropicRequest,
+  upstreamBase: string,
+  mockToken: boolean,
+): Promise<ChatResult> {
+  const chatBody = JSON.stringify(payload)
+  const agentInitiated = payload.messages.some(
+    (m) => m.role === "assistant" || m.role === "tool",
+  )
+  const vision = detectVision(payload)
+
+  let useResponses = responsesOnlyModels.has(payload.model)
+  let attempt = 0
+  while (attempt < 2) {
+    const token = mockToken ? "mock" : await getCopilotToken(attempt > 0)
+    const responsesReq = useResponses
+      ? toResponsesRequest(anthropic)
+      : null
+    const res = await fetch(
+      useResponses ? `${upstreamBase}/responses` : `${upstreamBase}/chat/completions`,
+      {
+        method: "POST",
+        headers: copilotRequestHeaders(token, {
+          agentInitiated,
+          vision,
+          accept: payload.stream ? "text/event-stream" : "application/json",
+        }),
+        body: useResponses ? JSON.stringify(responsesReq) : chatBody,
+      },
+    )
+
+    if ((res.status === 401 || res.status === 403) && attempt === 0) {
+      // Free the parked socket before retrying with a fresh token.
+      await res.body?.cancel().catch(() => {})
+      invalidateCopilotToken()
+      attempt++
+      continue
+    }
+
+    if (res.ok) {
+      return { ok: true, res, dialect: useResponses ? "responses" : "chat" }
+    }
+
+    const text = await res.text()
+    // Copilot serves some models only via the Responses API; switch and
+    // retry within the same attempt budget.
+    if (
+      res.status === 400 &&
+      !useResponses &&
+      /chat\/completions endpoint/i.test(text)
+    ) {
+      responsesOnlyModels.add(payload.model)
+      useResponses = true
+      continue
+    }
+    return { ok: false, status: res.status, message: friendlyUpstreamError(text) }
+  }
+  return { ok: false, status: 502, message: "upstream retry exhausted" }
+}
+
+// Parse the upstream SSE stream into Anthropic SSE events. The "responses"
+// dialect first maps Responses events onto OpenAI-style chunks so the same
+// StreamTranslator renders both.
+function sseResponse(
+  upstream: Response,
+  model: string,
+  dialect: "chat" | "responses" = "chat",
+): Response {
+  const translator = new StreamTranslator(model)
+  const eventAdapter =
+    dialect === "responses" ? new ResponsesEventAdapter() : null
+  // Held in the closure so client disconnects can cancel the upstream read
+  // (upstream.body.cancel() would fail: the stream is locked by the reader).
+  let reader: ReadableStreamDefaultReader<Uint8Array> | null = null
+
+  const stream = new ReadableStream<Uint8Array>({
+    async start(controller) {
+      const enc = new TextEncoder()
+      let closed = false
+      const send = (event: StreamEventData) => {
+        if (closed) return
+        try {
+          controller.enqueue(
+            enc.encode(
+              `event: ${event.event}\ndata: ${JSON.stringify(event.data)}\n\n`,
+            ),
+          )
+        } catch {
+          closed = true
+        }
+      }
+      const stop = () => {
+        closed = true
+      }
+
+      // Flush headers immediately and keep the connection warm while the
+      // upstream thinks; Claude Code aborts a silent stream after 300s.
+      send({ event: "ping", data: { type: "ping" } })
+      const pinger = setInterval(
+        () => send({ event: "ping", data: { type: "ping" } }),
+        15000,
+      )
+
+      try {
+        reader = upstream.body!.getReader()
+        const decoder = new TextDecoder()
+        let buffer = ""
+        let errored = false
+        readLoop: while (true) {
+          const { done, value } = await reader.read()
+          if (done || closed) break
+          buffer += decoder.decode(value, { stream: true })
+          let idx: number
+          while ((idx = buffer.indexOf("\n")) !== -1) {
+            const line = buffer.slice(0, idx).replace(/\r$/, "")
+            buffer = buffer.slice(idx + 1)
+            if (!line.startsWith("data:")) continue
+            const data = line.slice(5).trim()
+            if (!data || data === "[DONE]") continue
+
+            let parsed: unknown
+            try {
+              parsed = JSON.parse(data)
+            } catch {
+              debug("unparsable upstream SSE line:", data.slice(0, 200))
+              continue
+            }
+            let obj = parsed as OpenAIResponse
+            if (eventAdapter) {
+              const chunk = eventAdapter.pushEvent(parsed as Record<string, unknown>)
+              if (!chunk) continue
+              obj = chunk
+            }
+            if (obj && typeof obj === "object" && obj.error) {
+              // In-band upstream error (quota, entitlement, moderation).
+              // The error event is terminal — no fake message termination
+              // after it, so the client cannot mistake this for success.
+              debug("upstream error chunk:", data.slice(0, 500))
+              errored = true
+              const message = (obj.error.message as string | undefined) ?? ""
+              const isQuota =
+                (obj.error.code as string | undefined) === "quota_exceeded" ||
+                /quota/i.test(message)
+              send({
+                event: "error",
+                data: {
+                  type: "error",
+                  error: {
+                    type: isQuota ? "invalid_request_error" : "api_error",
+                    message: isQuota
+                      ? QUOTA_GUIDANCE
+                      : message || `upstream error chunk (see CLCO_DEBUG)`,
+                  },
+                },
+              })
+              break readLoop
+            }
+            if (!Array.isArray(obj?.choices)) {
+              debug("non-conforming upstream chunk:", data.slice(0, 200))
+              continue
+            }
+            for (const ev of translator.pushChunk(obj)) send(ev)
+            if (closed) break readLoop
+          }
+        }
+        if (!errored) {
+          for (const ev of translator.finish()) send(ev)
+        }
+      } catch (err) {
+        send({
+          event: "error",
+          data: {
+            type: "error",
+            error: { type: "api_error", message: String(err) },
+          },
+        })
+      } finally {
+        clearInterval(pinger)
+        stop()
+        try {
+          controller.close()
+        } catch {
+          // already closed by client cancellation
+        }
+      }
+    },
+    cancel() {
+      reader?.cancel().catch(() => {})
+    },
+  })
+  return new Response(stream, {
+    headers: {
+      "content-type": "text/event-stream",
+      "cache-control": "no-cache",
+      "x-accel-buffering": "no",
+    },
+  })
+}
+
+async function handleMessages(
+  req: Request,
+  upstreamBase: string,
+  mockToken: boolean,
+): Promise<Response> {
+  const started = Date.now()
+  let payload: AnthropicRequest
+  try {
+    payload = (await req.json()) as AnthropicRequest
+  } catch {
+    return anthropicError(400, "invalid JSON body")
+  }
+  const stream = payload.stream === true
+  logLine(
+    `[${timestamp()}] POST /v1/messages model=${payload.model} stream=${stream}`,
+  )
+
+  const upstreamPayload = translateRequest(payload)
+  let result: Awaited<ReturnType<typeof copilotChat>>
+  try {
+    result = await copilotChat(upstreamPayload, payload, upstreamBase, mockToken)
+  } catch (err) {
+    return anthropicError(502, `upstream request failed: ${String(err)}`)
+  }
+  if (!result.ok) {
+    logLine(`[${timestamp()}]   -> HTTP ${result.status} (${Date.now() - started}ms)`)
+    return anthropicError(result.status, result.message)
+  }
+  const res = result.res
+
+  if (!stream) {
+    let data: OpenAIResponse
+    try {
+      const raw = (await res.json()) as unknown
+      data =
+        result.dialect === "responses"
+          ? responsesToOpenAIResponse(raw as Record<string, unknown>)
+          : (raw as OpenAIResponse)
+    } catch {
+      // A 200 with a non-JSON body (proxy page, HTML error) is an upstream
+      // failure, not a client error — must be terminal 502, not a retryable
+      // 500.
+      return anthropicError(502, "upstream returned a non-JSON body")
+    }
+    if (data && typeof data === "object" && data.error) {
+      logLine(`[${timestamp()}]   -> upstream error body (${Date.now() - started}ms)`)
+      return anthropicError(
+        502,
+        `upstream error: ${JSON.stringify(data.error).slice(0, 500)}`,
+      )
+    }
+    if (!Array.isArray(data?.choices)) {
+      return anthropicError(502, "upstream returned a non-conforming response")
+    }
+    logLine(`[${timestamp()}]   -> 200 (${Date.now() - started}ms)`)
+    return Response.json(translateResponse(data))
+  }
+
+  // A 200 that is not actually an SSE stream is an error body, not a message.
+  const contentType = res.headers.get("content-type") ?? ""
+  if (!contentType.includes("text/event-stream")) {
+    const detail = (await res.text()).slice(0, 500)
+    logLine(
+      `[${timestamp()}]   -> 200 non-SSE body: ${contentType} (${Date.now() - started}ms)`,
+    )
+    return anthropicError(502, `upstream returned non-streaming body: ${detail}`)
+  }
+
+  logLine(`[${timestamp()}]   -> 200 streaming (${result.dialect})`)
+  return sseResponse(res, upstreamPayload.model, result.dialect)
+}
+
+// Bun derives req.url from the client-supplied Host header, so comparing
+// the Host header against url.host is a tautology. Compare against the
+// origin we actually bound instead.
+function authorize(req: Request, selfHost: string): Response | null {
+  if (req.headers.get("host") !== selfHost) {
+    return anthropicError(403, "host header mismatch")
+  }
+  if (req.headers.get("authorization") !== `Bearer ${LOCAL_TOKEN}`) {
+    return anthropicError(401, "missing or invalid adapter token")
+  }
+  return null
+}
+
+async function handle(
+  req: Request,
+  upstreamBase: string,
+  mockToken: boolean,
+  selfHost: string,
+): Promise<Response> {
+  const url = new URL(req.url)
+  const path = url.pathname
+
+  if (path === "/api/hello") {
+    // Claude Code's connection-warming probe; auth keeps it from being a
+    // port-scan oracle. Rejecting it is harmless by design.
+    return authorize(req, selfHost) ?? new Response(null, { status: 200 })
+  }
+
+  if (path !== "/v1/messages" && path !== "/v1/messages/count_tokens") {
+    if (req.method === "GET" && path === "/v1/models") {
+      // Gateway model discovery (CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY):
+      // serve the list captured at startup — Claude Code aborts discovery
+      // after 3 seconds, so a live upstream fetch would silently fail.
+      logLine(`[${timestamp()}] GET /v1/models`)
+      const denied = authorize(req, selfHost)
+      if (denied) return denied
+      const entries = upstreamModels()
+      if (entries.length === 0) {
+        return anthropicError(502, "model list unavailable (discovery failed at startup)")
+      }
+      return Response.json({
+        data: entries.map((e) => ({
+          type: "model",
+          id: e.id,
+          display_name: e.name,
+        })),
+        has_more: false,
+      })
+    }
+    return anthropicError(404, `not found: ${req.method} ${path}`)
+  }
+  if (req.method !== "POST") {
+    return anthropicError(404, `not found: ${req.method} ${path}`)
+  }
+  const denied = authorize(req, selfHost)
+  if (denied) return denied
+
+  const contentType = req.headers.get("content-type") ?? ""
+  if (!contentType.includes("application/json")) {
+    return anthropicError(400, "content-type must be application/json")
+  }
+  const contentLength = Number(req.headers.get("content-length") ?? "0")
+  if (contentLength > MAX_BODY_BYTES) {
+    return anthropicError(413, "request body too large")
+  }
+
+  if (path === "/v1/messages/count_tokens") {
+    try {
+      const payload = (await req.json()) as AnthropicRequest
+      logLine(`[${timestamp()}] POST /v1/messages/count_tokens`)
+      return Response.json({ input_tokens: estimateTokens(payload) })
+    } catch {
+      return anthropicError(400, "invalid JSON body")
+    }
+  }
+
+  return handleMessages(req, upstreamBase, mockToken)
+}
+
+export async function startServer(
+  opts: ServerOptions = {},
+): Promise<ServerHandle> {
+  const upstreamBase = (opts.upstream ?? copilotBaseUrl()).replace(/\/$/, "")
+  const mockToken = opts.upstream !== undefined || isMockMode()
+  // Filled in once the port is bound; the fetch closure only runs afterwards.
+  let selfHost = ""
+  const server = Bun.serve({
+    hostname: "127.0.0.1",
+    port: opts.port ?? 0,
+    fetch: (req) =>
+      handle(req, upstreamBase, mockToken, selfHost).catch((err) =>
+        anthropicError(500, String(err)),
+      ),
+  })
+  selfHost = `127.0.0.1:${server.port ?? 0}`
+  return {
+    url: server.url.toString().replace(/\/$/, ""),
+    port: server.port ?? 0,
+    stop: () => server.stop(true),
+  }
+}
+
+// Imported lazily by name to keep the module graph simple.
+

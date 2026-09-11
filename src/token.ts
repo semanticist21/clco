@@ -1,0 +1,164 @@
+// Short-lived Copilot token management (exchange + cache + refresh) and
+// Copilot model discovery.
+
+import {
+  GITHUB_API_BASE_URL,
+  copilotBaseUrl,
+  copilotRequestHeaders,
+  githubRequestHeaders,
+  isMockMode,
+} from "./api"
+import { ensureGithubToken } from "./auth"
+
+export interface ModelMapping {
+  opus: string
+  sonnet: string
+  haiku: string
+  fable: string
+}
+
+interface CopilotTokenResponse {
+  token: string
+  expires_at: number // epoch seconds
+  refresh_in?: number
+}
+
+let cached: { token: string; expiresAt: number } | null = null
+let githubToken: string | null = null
+let pending: Promise<string> | null = null
+
+const EXPIRY_MARGIN_MS = 5 * 60 * 1000
+
+export async function getCopilotToken(force = false): Promise<string> {
+  if (isMockMode()) return "mock"
+  if (!force && cached && cached.expiresAt - EXPIRY_MARGIN_MS > Date.now()) {
+    return cached.token
+  }
+  // Deduplicate concurrent refreshes — including forced ones after a 401.
+  // Any in-flight fetch returns a freshly minted token, so sharing is always
+  // correct and concurrent retries never race into parallel exchanges.
+  if (pending) return pending
+  pending = fetchCopilotToken().finally(() => {
+    pending = null
+  })
+  return pending
+}
+
+async function fetchCopilotToken(): Promise<string> {
+  githubToken ??= (await ensureGithubToken()).token
+  const res = await fetch(`${GITHUB_API_BASE_URL}/copilot_internal/v2/token`, {
+    headers: githubRequestHeaders(githubToken),
+    // Short metadata call — never let a hung connection stall startup.
+    signal: AbortSignal.timeout(10_000),
+  })
+  if (res.status === 401 || res.status === 403) {
+    // The stored GitHub token is revoked/expired — drop it so the next
+    // ensureGithubToken can pick up a fresh one after re-auth.
+    githubToken = null
+    cached = null
+    throw new Error(
+      "GitHub 토큰이 거부됐습니다 — `clco auth`로 재인증하세요",
+    )
+  }
+  if (!res.ok) {
+    throw new Error(
+      `Copilot 토큰 발급 실패: HTTP ${res.status} (Copilot 구독이 활성화되어 있는지 확인하세요)`,
+    )
+  }
+  const data = (await res.json()) as CopilotTokenResponse
+  if (typeof data.expires_at !== "number" || !Number.isFinite(data.expires_at)) {
+    throw new Error("Copilot 토큰 응답에 expires_at이 없습니다")
+  }
+  cached = { token: data.token, expiresAt: data.expires_at * 1000 }
+  return cached.token
+}
+
+export function invalidateCopilotToken(): void {
+  cached = null
+}
+
+const FALLBACK_MODELS: ModelMapping = {
+  opus: "claude-opus-4.1",
+  sonnet: "claude-sonnet-4.5",
+  haiku: "claude-sonnet-4.5",
+  fable: "claude-sonnet-4.5",
+}
+
+// Highest version wins ("claude-sonnet-4.5" > "claude-sonnet-4" > "...-3.7").
+function pickModel(ids: string[], needle: string): string | undefined {
+  const matches = ids.filter((id) => id.includes(needle))
+  matches.sort((a, b) => b.localeCompare(a, undefined, { numeric: true }))
+  return matches[0]
+}
+
+// Raw upstream model list, captured during discovery at startup. The server
+// serves GET /v1/models from this so Claude Code's 3-second discovery
+// timeout is never hit waiting on a live upstream fetch.
+let cachedModelList: Array<{ id: string; name: string }> | null = null
+
+export function upstreamModels(): Array<{ id: string; name: string }> {
+  return cachedModelList ?? []
+}
+
+// Resolve Copilot model slugs for Claude Code's opus/sonnet/haiku slots.
+// Priority: env overrides > Copilot /models discovery > hardcoded fallback.
+export async function discoverModels(): Promise<ModelMapping> {
+  const env = (name: string) => process.env[name]?.trim() || undefined
+  const overrides = {
+    opus: env("CLCO_OPUS"),
+    sonnet: env("CLCO_SONNET"),
+    haiku: env("CLCO_HAIKU"),
+    fable: env("CLCO_FABLE"),
+  }
+  try {
+    const token = await getCopilotToken()
+    const res = await fetch(`${copilotBaseUrl()}/models`, {
+      headers: copilotRequestHeaders(token),
+      signal: AbortSignal.timeout(10_000),
+    })
+    if (res.ok) {
+      const body = (await res.json()) as {
+        data?: Array<{ id?: string; name?: string; slug?: string }>
+        models?: Array<{ id?: string; name?: string; slug?: string }>
+      }
+      const raw = body.models ?? body.data ?? []
+      cachedModelList = raw
+        .map((m) => ({
+          id: m.id ?? m.slug ?? "",
+          name: m.name ?? m.id ?? m.slug ?? "",
+        }))
+        .filter((m) => m.id)
+      const ids = cachedModelList.map((m) => m.id)
+      const opus = overrides.opus ?? pickModel(ids, "claude-opus")
+      const sonnet = overrides.sonnet ?? pickModel(ids, "claude-sonnet")
+      const haiku =
+        overrides.haiku ??
+        pickModel(ids, "claude-haiku") ??
+        pickModel(ids, "claude-sonnet")
+      const fable =
+        overrides.fable ??
+        pickModel(ids, "claude-fable") ??
+        sonnet ??
+        FALLBACK_MODELS.fable
+      if (sonnet) {
+        return {
+          opus: opus ?? FALLBACK_MODELS.opus,
+          sonnet,
+          haiku: haiku ?? FALLBACK_MODELS.haiku,
+          fable,
+        }
+      }
+    }
+  } catch {
+    // fall through to fallbacks
+  }
+  console.error(
+    "[clco] Copilot /models 감지 실패 — 기본 슬러그 사용 (CLCO_OPUS/SONNET/HAIKU로 지정 가능)",
+  )
+  return {
+    opus: overrides.opus ?? FALLBACK_MODELS.opus,
+    sonnet: overrides.sonnet ?? FALLBACK_MODELS.sonnet,
+    haiku: overrides.haiku ?? FALLBACK_MODELS.haiku,
+    fable: overrides.fable ?? FALLBACK_MODELS.fable,
+  }
+}
