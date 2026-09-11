@@ -8,22 +8,25 @@ import { existsSync, mkdirSync } from "node:fs"
 import { appendFile } from "node:fs/promises"
 import { homedir } from "node:os"
 import { join } from "node:path"
-import { clearAuth, loadPrefs, savePrefs } from "./config"
+import { clearAuth, loadPrefs, savePrefs, saveAuth } from "./config"
 import { ensureGithubToken, runDeviceFlow } from "./auth"
 import { GITHUB_API_BASE_URL, githubRequestHeaders, isMockMode } from "./api"
-import { discoverModels, upstreamModels } from "./token"
+import { copilotTokenFacts, discoverModels, upstreamModels } from "./token"
 import { setAdapterLogSink, startServer } from "./server"
 import { resolveClaude, runClaude } from "./spawn"
 
 const HELP = `clco — GitHub Copilot 구독으로 Claude Code 실행
 
 사용법:
-  clco [--port N] [-- <claude 인자>]
+  clco [--port N] [claude 인자...]
       GitHub 인증(최초 1회) → 모델 선택 → 로컬 어댑터 기동 → claude 실행.
-      claude 인자는 반드시 -- 뒤에: clco -- -p "질문" (이때 선택 프롬프트 생략).
-      -- 앞의 모르는 인자는 에러 + 명령어 리스트를 표시합니다.
+      clco가 모르는 대시 인자는 claude로 그대로 전달됩니다:
+        clco --chrome / clco --dangerously-skip-permissions / clco -p "질문"
+      모델 선택 프롬프트는 -p(무인 실행)와 비대화 환경에서만 생략됩니다.
   clco serve [--port N]
       어댑터 서버만 기동 (claude는 직접 연결해서 사용)
+  clco status
+      계정·플랜·모델별 경로/권한/컨텍스트 확인
   clco login
       GitHub device flow (재)인증 — 계정 전환도 이걸로
   clco logout
@@ -194,21 +197,36 @@ async function runUpdate(): Promise<void> {
 // dialect each one routes through, and their declared effort/context limits.
 async function runStatus(): Promise<void> {
   const identity = await ensureGithubToken()
-  // The stored token may predate login capture; ask GitHub directly so the
-  // answer to "which account am I on" is never ambiguous.
+  // The stored token may predate login capture. Ask GitHub once, remember the
+  // answer, and say plainly why it is missing when the lookup is refused —
+  // corporate policy blocks personal-account API calls on some networks.
   let login = identity.login
+  let lookupNote = ""
   if (!login && !isMockMode()) {
     try {
       const res = await fetch(`${GITHUB_API_BASE_URL}/user`, {
         headers: githubRequestHeaders(identity.token),
         signal: AbortSignal.timeout(10_000),
       })
-      if (res.ok) login = ((await res.json()) as { login?: string }).login
-    } catch {
-      // best effort
+      if (res.ok) {
+        login = ((await res.json()) as { login?: string }).login
+        if (login) {
+          // Cache it so the next run needs no network at all.
+          await saveAuth({ github_token: identity.token, login }).catch(() => {})
+        }
+      } else {
+        lookupNote = `조회 거부됨 (HTTP ${res.status})`
+      }
+    } catch (err) {
+      lookupNote = `조회 실패 (${err instanceof Error ? err.message : String(err)})`
     }
   }
-  console.log(`계정: ${login ? `@${login}` : "(로그인됨, 계정명 확인 실패)"}`)
+  console.log(
+    `계정: ${login ? `@${login}` : `(로그인됨${lookupNote ? ` — 계정명 ${lookupNote}` : ""})`}`,
+  )
+
+  const facts = await copilotTokenFacts().catch(() => ({}) as { sku?: string })
+  if (facts.sku) console.log(`플랜: ${facts.sku}`)
   await discoverModels()
   const models = upstreamModels()
   if (models.length === 0) {

@@ -82,6 +82,28 @@ export function invalidateCopilotToken(): void {
   cached = null
 }
 
+/**
+ * Non-secret facts Copilot encodes in its own token (plan and expiry). The
+ * plan is what actually explains a 402, and it needs no extra network call.
+ */
+export async function copilotTokenFacts(): Promise<{
+  sku?: string
+  expiresAt?: number
+}> {
+  if (isMockMode()) return {}
+  const token = await getCopilotToken()
+  const field = (key: string) =>
+    token
+      .split(";")
+      .find((part) => part.startsWith(`${key}=`))
+      ?.slice(key.length + 1)
+  const exp = Number(field("exp"))
+  return {
+    sku: field("sku"),
+    expiresAt: Number.isFinite(exp) && exp > 0 ? exp * 1000 : undefined,
+  }
+}
+
 const FALLBACK_MODELS: ModelMapping = {
   opus: "claude-opus-4.1",
   sonnet: "claude-sonnet-4.5",
