@@ -7,6 +7,7 @@ import {
   mkdir,
   readFile,
   rename,
+  rm,
   unlink,
   writeFile,
 } from "node:fs/promises"
@@ -106,4 +107,8 @@ export async function savePrefs(prefs: Prefs): Promise<void> {
   await writeFile(prefsPath(), JSON.stringify(prefs, null, 2) + "\n", {
     mode: 0o600,
   }).catch(() => {})
+}
+
+export async function clearAuth(): Promise<void> {
+  await rm(authPath()).catch(() => {})
 }

@@ -6,10 +6,10 @@
 import * as p from "@clack/prompts"
 import { appendFile } from "node:fs/promises"
 import { homedir } from "node:os"
+import { clearAuth, loadPrefs, savePrefs } from "./config"
 import { ensureGithubToken, runDeviceFlow } from "./auth"
 import { isMockMode } from "./api"
 import { discoverModels, upstreamModels } from "./token"
-import { loadPrefs, savePrefs } from "./config"
 import { setAdapterLogSink, startServer } from "./server"
 import { resolveClaude, runClaude } from "./spawn"
 
@@ -22,8 +22,10 @@ const HELP = `clco — GitHub Copilot 구독으로 Claude Code 실행
       인자를 주면(clco -- -p 등) 모델 선택 프롬프트는 건너뜀.
   clco serve [--port N]
       어댑터 서버만 기동 (claude는 직접 연결해서 사용)
-  clco auth
-      GitHub device flow 재인증
+  clco login
+      GitHub device flow (재)인증 — 계정 전환도 이걸로
+  clco logout
+      저장된 GitHub 토큰 삭제
   clco help
 
 환경변수:
@@ -34,7 +36,7 @@ const HELP = `clco — GitHub Copilot 구독으로 Claude Code 실행
 `
 
 interface Args {
-  command: "run" | "serve" | "auth"
+  command: "run" | "serve" | "auth" | "login" | "logout"
   port?: number
   claudeArgs: string[]
 }
@@ -52,7 +54,10 @@ function parseArgs(argv: string[]): Args {
   let i = 0
   while (i < leading.length) {
     const arg = leading[i]
-    if ((arg === "serve" || arg === "auth") && command === "run") {
+    if (
+      (arg === "serve" || arg === "auth" || arg === "login" || arg === "logout") &&
+      command === "run"
+    ) {
       command = arg
       i++
       continue
@@ -108,9 +113,15 @@ async function main(): Promise<void> {
   }
   const args = parseArgs(argv)
 
-  if (args.command === "auth") {
+  if (args.command === "logout") {
+    await clearAuth()
+    console.log("✓ 로그아웃 — ~/.config/clco/auth.json 삭제. 다시 로그인: clco login")
+    return
+  }
+
+  if (args.command === "auth" || args.command === "login") {
     if (args.port !== undefined) {
-      console.error("[clco] auth 모드에서는 --port가 무시됩니다")
+      console.error(`[clco] ${args.command} 모드에서는 --port가 무시됩니다`)
     }
     if (isMockMode()) {
       console.log("목업 모드 (CLCO_UPSTREAM) — 인증 생략")
