@@ -19,7 +19,7 @@ export interface SetupOverrides {
 // A future option added to an EXISTING setup is absent from the stored
 // object, i.e. off, which is the conservative direction for a change nobody
 // asked for.
-export const DEFAULTS_FOR_TESTS: Omit<SetupPrefs, "version"> = {
+export const SETUP_DEFAULTS: Omit<SetupPrefs, "version"> = {
   bypass: true,
   chrome: true,
   select: true,
@@ -27,7 +27,7 @@ export const DEFAULTS_FOR_TESTS: Omit<SetupPrefs, "version"> = {
 
 export async function runSetup(): Promise<SetupPrefs> {
   const prefs = await loadPrefs()
-  const current = prefs.setup ?? { ...DEFAULTS_FOR_TESTS, version: SETUP_VERSION }
+  const current = prefs.setup ?? { ...SETUP_DEFAULTS, version: SETUP_VERSION }
 
   p.intro("clco setup - save the flags you would otherwise type every run")
   const ask = async (message: string, initialValue: boolean): Promise<boolean> => {
