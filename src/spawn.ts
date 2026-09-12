@@ -271,6 +271,80 @@ export function buildModelOverridesFrom(
   return Object.keys(out).length > 0 ? out : null
 }
 
+/** What the launch needs, minus anything that touches the filesystem. */
+export interface LaunchPlan {
+  baseUrl: string
+  models: ModelMapping
+  defaultModel?: string
+  claudeArgs: string[]
+  /** The private CLAUDE_CONFIG_DIR, or null when clco could not build one. */
+  configDir?: string | null
+}
+
+/**
+ * The argv clco hands claude, as a pure function.
+ *
+ * Extracted from runClaude so the settings blob can be asserted without
+ * spawning a process: the model-pinning bug below was invisible to tests
+ * precisely because this was tangled up with Bun.spawn.
+ */
+export function buildLaunchArgs(plan: LaunchPlan): string[] {
+  const userPickedModel = plan.claudeArgs.some(
+    (a) => a === "--model" || a.startsWith("--model="),
+  )
+  const env = buildSettingsEnv(plan.baseUrl, plan.models, plan.defaultModel)
+  const picker = buildModelPicker(
+    plan.defaultModel ?? plan.models.sonnet,
+    Number(env.CLAUDE_CODE_AUTO_COMPACT_WINDOW),
+  )
+  const overrides = buildModelOverridesFrom(upstreamModels())
+  const configDir = plan.configDir ?? undefined
+  // The model rides in the settings blob as well as in --model, because
+  // CLAUDE_CONFIG_DIR only moves the USER settings file. Claude Code also
+  // reads a PROJECT settings file at ./.claude/settings.json, which the
+  // private config dir does not touch - and when the working directory is the
+  // home directory those are the same file, so the user's real
+  // ~/.claude/settings.json comes back in through the project tier and its
+  // `model` key pins the session. Observed: clco printed
+  // "+ model: gpt-4.1-2025-04-14" while /model reported ".claude/settings.json
+  // pins Claude Fable 5.1". The binary's own settings docs say projectSettings
+  // and localSettings are repo-controllable and only policy/user/flag settings
+  // outrank them, so the --settings tier is the one that wins.
+  //
+  // Not written into the private settings FILE: that would persist, and a
+  // /model pick landing there for good is what the private config dir exists
+  // to prevent.
+  const settings = JSON.stringify({
+    env: { ...env, ...(configDir ? { CLAUDE_CONFIG_DIR: configDir } : {}) },
+    ...(picker ? { modelPicker: picker } : {}),
+    ...(overrides ? { modelOverrides: overrides } : {}),
+    ...(userPickedModel || !plan.defaultModel ? {} : { model: plan.defaultModel }),
+  })
+  // Seeded rather than pinned (see buildSettingsEnv); a --model the user
+  // passed themselves always wins.
+  const modelArgs =
+    userPickedModel || !plan.defaultModel ? [] : ["--model", plan.defaultModel]
+  return ["--settings", settings, ...modelArgs, ...plan.claudeArgs]
+}
+
+/** The child environment, kept next to the argv it belongs with. */
+export function buildLaunchEnv(
+  plan: LaunchPlan,
+  extraEnv?: Record<string, string>,
+): Record<string, string | undefined> {
+  const env = buildSettingsEnv(plan.baseUrl, plan.models, plan.defaultModel)
+  const configDir = plan.configDir ?? undefined
+  const childEnv: Record<string, string | undefined> = {
+    ...process.env,
+    ...env,
+    ...extraEnv,
+    ...(configDir ? { CLAUDE_CONFIG_DIR: configDir } : {}),
+  }
+  // Never let a parent-exported key override the adapter routing.
+  delete childEnv.ANTHROPIC_API_KEY
+  return childEnv
+}
+
 export async function runClaude(opts: {
   baseUrl: string
   models: ModelMapping
@@ -283,37 +357,12 @@ export async function runClaude(opts: {
   // Claude persists a /model pick into its config dir. Give it a private one
   // so that write can never reach the user's ~/.claude.
   const configDir = await prepareClaudeHome()
-  const env = buildSettingsEnv(opts.baseUrl, opts.models, opts.defaultModel)
-  const picker = buildModelPicker(
-    opts.defaultModel ?? opts.models.sonnet,
-    Number(env.CLAUDE_CODE_AUTO_COMPACT_WINDOW),
-  )
-  const overrides = buildModelOverridesFrom(upstreamModels())
-  const settings = JSON.stringify({
-    env: { ...env, ...(configDir ? { CLAUDE_CONFIG_DIR: configDir } : {}) },
-    ...(picker ? { modelPicker: picker } : {}),
-    ...(overrides ? { modelOverrides: overrides } : {}),
-  })
-
-  const childEnv: Record<string, string | undefined> = {
-    ...process.env,
-    ...env,
-    ...opts.extraEnv,
-    ...(configDir ? { CLAUDE_CONFIG_DIR: configDir } : {}),
-  }
-  // Never let a parent-exported key override the adapter routing.
-  delete childEnv.ANTHROPIC_API_KEY
-
-  // Seed the session model without pinning it (see buildSettingsEnv). A
-  // --model the user passed themselves always wins.
-  const userPickedModel = opts.claudeArgs.some(
-    (a) => a === "--model" || a.startsWith("--model="),
-  )
-  const modelArgs =
-    userPickedModel || !opts.defaultModel ? [] : ["--model", opts.defaultModel]
+  const plan: LaunchPlan = { ...opts, configDir }
+  const launchArgs = buildLaunchArgs(plan)
+  const childEnv = buildLaunchEnv(plan, opts.extraEnv)
 
   const proc = Bun.spawn(
-    [claude, "--settings", settings, ...modelArgs, ...opts.claudeArgs],
+    [claude, ...launchArgs],
     {
       stdio: ["inherit", "inherit", "inherit"],
       env: childEnv,

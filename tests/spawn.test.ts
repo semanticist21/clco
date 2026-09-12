@@ -5,6 +5,7 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { catalogModelIds } from "../src/catalog"
 import {
+  buildLaunchArgs,
   buildModelOverridesFrom,
   buildModelPickerFrom,
   buildSettingsEnv,
@@ -275,5 +276,56 @@ describe("buildSettingsEnv — what must not be there", () => {
   test("gateway discovery stays off, so nothing writes into ~/.claude", () => {
     const env = buildSettingsEnv("http://127.0.0.1:1", models, "m", null)
     expect(env.CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY).toBeUndefined()
+  })
+})
+
+// CLAUDE_CONFIG_DIR only moves the USER settings file. Claude Code also reads
+// a PROJECT settings file at ./.claude/settings.json, which the private config
+// dir does not touch — and when the working directory IS the home directory
+// those are the same file, so the user's real ~/.claude/settings.json comes
+// back in through the project tier and its `model` key pins the session.
+// Observed: clco printed "+ model: gpt-4.1-2025-04-14" while /model reported
+// ".claude/settings.json pins Claude Fable 5.1". The settings tier clco
+// injects outranks the project tier, so the choice has to ride there too.
+describe("the model clco chose has to survive a project settings file", () => {
+  const MAPPING = { opus: "o", sonnet: "s", haiku: "h", fable: "f" }
+  const settingsOf = (args: string[]) => {
+    const i = args.indexOf("--settings")
+    return JSON.parse(args[i + 1]!) as { model?: string }
+  }
+
+  test("rides in the settings blob, not only in --model", () => {
+    const args = buildLaunchArgs({
+      baseUrl: "http://127.0.0.1:1",
+      models: MAPPING,
+      defaultModel: "gpt-4.1-2025-04-14",
+      claudeArgs: [],
+    })
+    expect(settingsOf(args).model).toBe("gpt-4.1-2025-04-14")
+    // Still passed as a flag as well: that is what a resumed session reads.
+    expect(args).toContain("--model")
+  })
+
+  test("stands aside for a model the user passed by hand", () => {
+    const args = buildLaunchArgs({
+      baseUrl: "http://127.0.0.1:1",
+      models: MAPPING,
+      defaultModel: "gpt-4.1-2025-04-14",
+      claudeArgs: ["--model", "kimi-k3"],
+    })
+    expect(settingsOf(args).model).toBeUndefined()
+    expect(args.filter((a: string) => a === "--model")).toHaveLength(1)
+  })
+
+  // No model asserted means no key: writing one would tell claude to override
+  // a project pin with a guess.
+  test("asserts nothing when clco chose nothing", () => {
+    const args = buildLaunchArgs({
+      baseUrl: "http://127.0.0.1:1",
+      models: MAPPING,
+      claudeArgs: [],
+    })
+    expect(settingsOf(args).model).toBeUndefined()
+    expect(args).not.toContain("--model")
   })
 })
