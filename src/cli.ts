@@ -253,6 +253,10 @@ async function runStatus(): Promise<void> {
   const facts = await copilotTokenFacts().catch(() => ({}) as { sku?: string })
   if (facts.sku) console.log(`플랜: ${facts.sku}`)
   await discoverModels()
+  // Populates the model catalog from the installed binary so the /model
+  // preview below matches what a real session would offer. Diagnostics must
+  // still work without claude present, so a failure is not fatal here.
+  await resolveClaude().catch(() => undefined)
   const discoveryNote = takeDiscoverySoftFailure()
   if (discoveryNote) console.error(discoveryNote)
   const models = upstreamModels()

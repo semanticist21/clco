@@ -3,7 +3,7 @@ import { existsSync } from "node:fs"
 import { readFile, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { CATALOG_MODEL_IDS } from "../src/catalog"
+import { catalogModelIds } from "../src/catalog"
 import {
   buildModelOverridesFrom,
   buildModelPickerFrom,
@@ -88,7 +88,7 @@ describe("buildModelPickerFrom", () => {
       model({ id: "gemini-3.8-flash" }),
     ])!
     for (const o of picker.options) {
-      if (o.behavesAs) expect(CATALOG_MODEL_IDS.has(o.behavesAs)).toBe(true)
+      if (o.behavesAs) expect(catalogModelIds().has(o.behavesAs)).toBe(true)
     }
   })
 

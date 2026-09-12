@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test"
 import {
-  CATALOG_MODEL_IDS,
+  catalogModelIds,
+  loadCatalog,
   advertisedId,
   familyOf,
   resolveBehavesAs,
@@ -37,12 +38,12 @@ describe("resolveBehavesAs", () => {
     // Without this the row carries no behavesAs, and claude declines to
     // offer it at all — an empty /model.
     const target = resolveBehavesAs("sonnet", ["gpt-6-astra", "kimi-k3"])
-    expect(CATALOG_MODEL_IDS.has(target)).toBe(true)
+    expect(catalogModelIds().has(target)).toBe(true)
   })
 
   test("always resolves to something claude knows", () => {
     for (const family of ["opus", "sonnet", "haiku", "fable"] as const) {
-      expect(CATALOG_MODEL_IDS.has(resolveBehavesAs(family, []))).toBe(true)
+      expect(catalogModelIds().has(resolveBehavesAs(family, []))).toBe(true)
     }
   })
 })
@@ -53,5 +54,30 @@ describe("familyOf", () => {
     expect(familyOf("claude-haiku-4.5")).toBe("haiku")
     expect(familyOf("claude-fable-5.1")).toBe("fable")
     expect(familyOf("gpt-6-astra")).toBe("sonnet")
+  })
+})
+
+describe("loadCatalog", () => {
+  test("reads the installed binary, caches it, and survives a bad path", async () => {
+    const binary = "/Users/kkomi/.local/share/claude/versions/2.1.269"
+    const before = catalogModelIds().size
+    // A path that cannot be read must never shrink the catalog — the
+    // built-in fallback has to keep standing.
+    await loadCatalog("/nonexistent/claude")
+    expect(catalogModelIds().size).toBe(before)
+
+    if (!(await Bun.file(binary).exists())) return
+    await loadCatalog(binary)
+    const scanned = catalogModelIds()
+    // The point of scanning: track the installed version, not clco's release.
+    expect(scanned.size).toBeGreaterThan(before)
+    expect(scanned.has("claude-sonnet-5")).toBe(true)
+
+    // Second call comes from the on-disk cache, so it must be fast enough
+    // that a claude upgrade is the only time anyone pays for the scan.
+    const t0 = performance.now()
+    await loadCatalog(binary)
+    expect(performance.now() - t0).toBeLessThan(200)
+    expect(catalogModelIds().size).toBe(scanned.size)
   })
 })

@@ -10,6 +10,7 @@ import { join } from "node:path"
 import {
   advertisedId,
   familyOf,
+  loadCatalog,
   resolveBehavesAs,
 } from "./catalog"
 import {
@@ -176,6 +177,10 @@ export async function resolveClaude(): Promise<string> {
     )
   }
   resolvedClaude = candidate
+  // Read the model catalog out of the binary we are about to launch, so the
+  // picker tracks the installed version rather than whatever was current when
+  // clco shipped. Cached per binary; a failure keeps the built-in fallback.
+  await loadCatalog(candidate)
   return candidate
 }
 
