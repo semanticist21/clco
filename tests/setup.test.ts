@@ -327,3 +327,17 @@ describe("registry reachability", () => {
     expect(startupLine(true, true, "tok", false, false)).toContain("neither bunx nor npx")
   })
 })
+
+describe("startup line honesty", () => {
+  // clco stands aside when the user passes their own --mcp-config, and
+  // claiming success there is the same trap as registering a server with no
+  // extension: a promise with nothing behind it.
+  test("says it stood aside rather than claiming success", () => {
+    expect(startupLine(true, true, "tok", true, undefined, false)).toContain(
+      "your own --mcp-config takes over",
+    )
+    expect(startupLine(true, true, "tok", true, true, true)).toBe(
+      "+ browser: Playwright MCP",
+    )
+  })
+})

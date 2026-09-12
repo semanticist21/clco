@@ -13,6 +13,7 @@
 // clco supports exactly it rather than maintaining a catalogue.
 
 import { readdir } from "node:fs/promises"
+import { copilotFetch } from "./api"
 import { homedir, platform } from "node:os"
 import { join } from "node:path"
 
@@ -158,24 +159,26 @@ export function parseToken(input: string): string | null | undefined {
 }
 
 /**
- * Whether npx can actually fetch the server.
+ * Whether the registry is actually reachable.
  *
- * The package is resolved from the registry at session start, so on a network
- * that blocks or proxies npm the server never starts — and the failure would
+ * The package is resolved from npm at session start, so on a network that
+ * blocks or proxies it the server never starts — and the failure would
  * otherwise surface only as an MCP connection error inside claude, with clco's
- * own startup line still claiming success. Checked with a short timeout so a
- * slow registry delays nothing.
+ * own startup line still claiming success. This has to be a real request: an
+ * earlier version ran `bunx --version`, which prints locally and therefore
+ * returned "reachable" on an air-gapped machine, so the warning could never
+ * fire on the networks it was written for.
  */
 export async function registryReachable(timeoutMs = 2500): Promise<boolean> {
   try {
-    const proc = Bun.spawn([runner(), "--version"], {
-      stdout: "ignore",
-      stderr: "ignore",
-    })
-    const timer = setTimeout(() => proc.kill(), timeoutMs)
-    const code = await proc.exited
-    clearTimeout(timer)
-    return code === 0
+    // copilotFetch, so a corporate CA applies here exactly as it does to the
+    // Copilot calls — otherwise this would report "blocked" on the very
+    // networks the CA support exists for.
+    const res = await copilotFetch(
+      "https://registry.npmjs.org/@playwright/mcp",
+      { method: "HEAD", signal: AbortSignal.timeout(timeoutMs) },
+    )
+    return res.ok
   } catch {
     return false
   }
@@ -195,6 +198,8 @@ export function startupLine(
   hasRunner = Bun.which("bunx") !== null || Bun.which("npx") !== null,
   /** Undefined when not checked; false when the registry is unreachable. */
   reachable?: boolean,
+  /** False when clco stood aside for a user-supplied --mcp-config. */
+  registered?: boolean,
 ): string | null {
   if (!enabled) return null
   if (!installed) {
@@ -202,6 +207,9 @@ export function startupLine(
   }
   if (!hasRunner) {
     return "! browser: neither bunx nor npx found - cannot start Playwright MCP"
+  }
+  if (registered === false) {
+    return "! browser: skipped - your own --mcp-config takes over"
   }
   if (reachable === false) {
     return (

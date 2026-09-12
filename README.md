@@ -4,15 +4,20 @@ Run Claude Code on your GitHub Copilot subscription. It starts a local adapter t
 
 ```
 $ clco
-✓ Checking GitHub token (0.0s)
-✓ Fetching Copilot token and model list (1.8s)
-┌  Pick a model — type to search
+│
+◇  Checking GitHub token ✓ 0.0s
+│
+◇  Fetching Copilot token and model list ✓ 1.8s
+│
+◆  Pick a model - type to search
+│  Search models...
 │  ● Claude Sonnet 5   claude-sonnet-5 · native · 200k
 │  ○ GPT-5.6 Luna      gpt-5.6-luna · responses · 200k
-│  ○ Kimi K3           kimi-k3 · chat · 918k · no effort tiers
-│  ...
+│  ○ Kimi K3           kimi-k3 · chat · 918k
+└
 + adapter: http://127.0.0.1:56844
 + model: claude-sonnet-5 (sonnet=claude-sonnet-5 opus=claude-opus-5 haiku=claude-haiku-4.5)
++ browser: Playwright MCP
 ```
 
 ## Install
@@ -41,15 +46,16 @@ clco
    | Question | Default | What it does |
    |---|---|---|
    | Run without permission prompts? | **Yes** | Passes `--dangerously-skip-permissions`, so claude edits files and runs commands without asking. `clco --no-bypass` for one session. |
-   | Enable Playwright MCP for browser control? | **Yes** | Registers a browser server for clco sessions only. Needs an extension — see [Browser control](#browser-control). `clco --no-browser` for one session. |
+   | Enable Playwright MCP for browser control? | **Yes** | Registers the Playwright MCP server for clco sessions only. Needs an extension — see [Browser control](#browser-control). `clco --no-browser` for one session. |
    | Pick a model each time clco starts? | **Yes** | Shows the model prompt at launch. `clco --no-select` for one session. |
 
 3. **Pick a model**, then claude starts. Switch mid-session with `/model`.
 
    Answering yes to the first two together is worth understanding: claude runs
-   without permission prompts, and each session fetches and runs
-   `@playwright/mcp` (a pinned version, via `npx`) with access to the browser
-   tab you share. Either is reasonable alone; both at once is a lot of trust in
+   without permission prompts, and each session resolves and runs the current
+   `@playwright/mcp` release from npm (`bunx -y @playwright/mcp@latest`) with
+   access to the browser tab you share. Not a pinned version — it is re-resolved
+   every session. Either is reasonable alone; both at once is a lot of trust in
    one command. `clco setup` changes them, `--no-bypass` / `--no-browser` skip
    them for a single run.
 
@@ -74,7 +80,8 @@ not predict it — a model can be marked `enabled` and still refuse. Picking one
 your plan does not cover answers `400 The requested model is not supported`.
 
 Pin a model instead of choosing: `clco --model kimi-k3`, or per slot with
-`CLCO_OPUS` / `CLCO_SONNET` / `CLCO_HAIKU` / `CLCO_FABLE`.
+`CLCO_OPUS` / `CLCO_SONNET` / `CLCO_HAIKU` / `CLCO_FABLE` — the four model
+slots Claude Code asks for by name.
 
 ## Browser control
 
@@ -100,23 +107,28 @@ Started with `bunx` (or `npx`), fetched at session start — so on a network tha
 
 ## What clco reads
 
-Nothing here leaves your machine — the only outbound requests are GitHub login,
-the Copilot token exchange, the model list, and your chat itself.
+Nothing clco reads from your disk leaves the machine. Its outbound requests are
+GitHub login, the Copilot token exchange, the model list, your chat itself,
+plus — with browser control on — fetching `@playwright/mcp` from npm each
+session, and `git pull` when you run `clco update`.
 
 - **Chrome, Chromium and Edge profile directories** — directory *names* only, to
   see whether the Playwright extension is installed.
 - **The claude binary** — scanned once per claude version for the model ids it
   knows, cached in `~/.config/clco/catalog.json`. Without it clco cannot tell
   which ids `/model` will accept.
-- **`~/.claude`** — mirrored into `~/.config/clco/claude-home` as symlinks, so
-  your plugins, skills, agents and history stay shared. Only `settings.json`
-  and its siblings are private copies; that is what keeps a `/model` pick out of
-  your real config. Your session history, projects and shell snapshots are
-  written into `~/.claude` exactly as a plain `claude` run would.
+- **`~/.claude`** — every entry is symlinked into `~/.config/clco/claude-home`
+  except `settings.json`, `settings.local.json` and `backups`, which are
+  private copies. So plugins, skills, agents, projects, history and shell
+  snapshots stay shared and are written into `~/.claude` exactly as a plain
+  `claude` run would; only the settings file, where a `/model` pick would land,
+  is clco's own.
 - **`~/.claude.json`** — copied into clco's config dir, since it holds trust
-  decisions and MCP servers. It carries account identifiers and any secrets your
-  MCP servers declare. `uninstall.sh --full` removes that copy; a plain
-  uninstall leaves it.
+  decisions and MCP servers, and it carries account identifiers and any secrets
+  your MCP servers declare. Your MCP servers and per-project trust are re-read
+  from the real file on every launch, so deleting a server or withdrawing trust
+  there applies to clco too; everything else in the copy is clco's own.
+  `uninstall.sh --full` removes it; a plain uninstall leaves it.
 
 ## Corporate networks
 
@@ -176,9 +188,12 @@ CLCO_UPSTREAM=http://127.0.0.1:9099 bun run scripts/mock-upstream.ts
 
 ## Caveats
 
-- Using Copilot outside official clients is a gray area of GitHub's terms. Heavy
-  use may flag your account, and Claude models consume premium quota. Intended
-  for personal use.
+- Using Copilot outside official clients is a gray area of GitHub's terms. clco
+  authenticates with the VS Code Copilot OAuth client id and sends the same
+  editor headers, so its requests are indistinguishable from the official
+  client — that is what makes it work, and what makes it a gray area. Heavy use
+  may flag your account, and Claude models consume premium quota. Intended for
+  personal use.
 - Extended thinking works on the native route only; it stays disabled on
   translated routes. `stop_sequences` are not enforced on Responses-API models.
 - `/effort` is forwarded when the selected model declares that level, and

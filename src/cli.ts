@@ -653,13 +653,24 @@ async function main(): Promise<void> {
   const browserEnabled =
     setup?.browser === true && args.overrides.browser !== false
   const browserExtension = browserEnabled ? await extensionInstalled() : false
+  // Computed from the arguments actually produced: clco stands aside when the
+  // user passes their own --mcp-config, and claiming success there would be
+  // the same trap as registering a server with no extension.
+  const injected = setupClaudeArgs(
+    setup,
+    args.overrides,
+    args.claudeArgs,
+    browserExtension,
+  )
+  const registered = injected.includes("--mcp-config")
   const browserLine = startupLine(
     browserEnabled,
     browserExtension,
     setup?.browserToken,
     undefined,
     // Only worth asking when everything else is in place.
-    browserExtension ? await registryReachable() : undefined,
+    browserExtension && registered ? await registryReachable() : undefined,
+    browserEnabled && browserExtension ? registered : undefined,
   )
   if (browserLine) console.error(browserLine)
 
@@ -672,15 +683,7 @@ async function main(): Promise<void> {
     baseUrl: server.url,
     models,
     defaultModel,
-    claudeArgs: [
-      ...setupClaudeArgs(
-        setup,
-        args.overrides,
-        args.claudeArgs,
-        await extensionInstalled(),
-      ),
-      ...args.claudeArgs,
-    ],
+    claudeArgs: [...injected, ...args.claudeArgs],
     extraEnv: setupEnv(setup, args.overrides),
   })
   server.stop()
