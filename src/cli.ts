@@ -29,7 +29,7 @@ import {
   extensionHint,
   extensionInstalled,
   parseToken,
-  registryReachable,
+  registryStatus,
   startupLine,
 } from "./browsermcp"
 import {
@@ -670,7 +670,7 @@ async function main(): Promise<void> {
     setup?.browserToken,
     undefined,
     // Only worth asking when everything else is in place.
-    browserExtension && registered ? await registryReachable() : undefined,
+    browserExtension && registered ? await registryStatus() : undefined,
     browserEnabled && browserExtension ? registered : undefined,
   )
   if (browserLine) console.error(browserLine)

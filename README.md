@@ -106,23 +106,24 @@ connect dialog every session:
 pbpaste | clco token       # clco token --clear to remove it
 ```
 
-Started with `bunx` (or `npx`) and re-resolved each session; ~18MB crosses the
-wire only on the first run or after a new release, but the version is looked up
-every time. If `registry.npmjs.org` is unreachable, clco says so at startup
-rather than leaving you with missing tools — that check only knows about
-`registry.npmjs.org`, so it cannot speak for an internal mirror.
+Started with `bunx` (or `npx`) and fetched from npm each session. If that fails,
+clco says which way it failed at startup rather than leaving you with tools that
+silently never appear:
 
-`CLCO_MCP_PACKAGE` overrides the spec — an internal mirror's name, a pinned
-version, or a rollback past a bad release:
+```
+! browser: cannot reach registry.npmjs.org - ...
+! browser: TLS rejected by registry.npmjs.org - ... Set CLCO_CA_BUNDLE to your company CA.
+```
+
+That check only knows about `registry.npmjs.org`, so it cannot speak for an
+internal mirror. `CLCO_MCP_PACKAGE` overrides the package spec for one — or to
+pin a version, or roll back past a bad release:
 
 ```sh
 CLCO_MCP_PACKAGE=@playwright/mcp@0.0.80 clco
 ```
 
-Pinning is not an offline mode. `bunx` skips the registry only when it still has
-its scratch install for that exact version, which macOS purges after three days
-and at every boot — so a first run, a new laptop, or a reboot needs the registry
-whichever spec you use. clco has no offline path for browser control.
+Pinning is not an offline mode: browser control needs npm either way.
 
 ## What clco reads
 

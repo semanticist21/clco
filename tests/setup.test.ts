@@ -101,7 +101,7 @@ describe("browser control", () => {
     expect(spec(browserMcpConfig(true, undefined))).toBe("@playwright/mcp@latest")
     // And the startup line has to name what actually runs, or "which version
     // was that?" has no answer after a bad release.
-    expect(startupLine(true, true, "tok", true, true, undefined, "@corp/x@1.0.0"))
+    expect(startupLine(true, true, "tok", true, "ok", undefined, "@corp/x@1.0.0"))
       .toBe("+ browser: @corp/x@1.0.0")
   })
 
@@ -329,10 +329,15 @@ describe("registry reachability", () => {
   // it never starts - and that failure would otherwise appear only as an MCP
   // error inside claude, while clco's startup line claimed success.
   test("says so instead of claiming success", () => {
-    expect(startupLine(true, true, "tok", true, false)).toContain(
-      "cannot reach the npm registry",
+    expect(startupLine(true, true, "tok", true, "blocked")).toContain(
+      "cannot reach registry.npmjs.org",
     )
-    expect(startupLine(true, true, "tok", true, true)).toBe(
+    // A re-signed certificate is a different problem with a different fix, and
+    // reporting it as "unreachable" sends the user looking at their firewall.
+    const tls = startupLine(true, true, "tok", true, "tls")!
+    expect(tls).toContain("TLS rejected")
+    expect(tls).toContain("CLCO_CA_BUNDLE")
+    expect(startupLine(true, true, "tok", true, "ok")).toBe(
       "+ browser: @playwright/mcp@latest",
     )
     // Not checked is not the same as unreachable.
@@ -343,7 +348,7 @@ describe("registry reachability", () => {
 
   // A missing runner is the more basic problem and should be named first.
   test("reports a missing runner ahead of the registry", () => {
-    expect(startupLine(true, true, "tok", false, false)).toContain("neither bunx nor npx")
+    expect(startupLine(true, true, "tok", false, "blocked")).toContain("neither bunx nor npx")
   })
 })
 
@@ -355,7 +360,7 @@ describe("startup line honesty", () => {
     expect(startupLine(true, true, "tok", true, undefined, false)).toContain(
       "your own --mcp-config takes over",
     )
-    expect(startupLine(true, true, "tok", true, true, true)).toBe(
+    expect(startupLine(true, true, "tok", true, "ok", true)).toBe(
       "+ browser: @playwright/mcp@latest",
     )
   })

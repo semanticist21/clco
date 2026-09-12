@@ -14,6 +14,7 @@
 
 import { readdir } from "node:fs/promises"
 import { copilotFetch } from "./api"
+import { isTlsTrustError } from "./tls"
 import { homedir, platform } from "node:os"
 import { join } from "node:path"
 
@@ -21,37 +22,20 @@ export const EXTENSION_ID = "mmlmfjhmonkocbjadbfplnigmagldckm"
 export const EXTENSION_NAME = "Playwright MCP Bridge"
 export const EXTENSION_URL =
   `https://chromewebstore.google.com/detail/playwright-extension/${EXTENSION_ID}`
-// @latest, not a pin, and the reasoning matters because an earlier version of
-// this comment got it wrong twice.
+// @latest. The server half is fetched from npm each session, and the extension
+// half auto-updates from the Web Store and cannot be pinned alongside it, so
+// pinning the server only guarantees the two drift apart. Pinning also does not
+// make browser control work offline - the registry is consulted either way on
+// any machine that has not just run that exact version.
 //
-// What a pin would buy is smaller than it looks. bunx keeps a scratch install
-// per exact spec string at $TMPDIR/bunx-<uid>-@playwright/mcp@<version>/, and
-// only that directory lets it skip the registry; the shared ~/.bun/install
-// cache does not (measured: fresh TMPDIR with a warm package cache and an
-// unreachable registry still fails on "downloading package manifest"). On
-// macOS that scratch directory is purged by com.apple.bsd.dirhelper after
-// CLEAN_FILES_OLDER_THAN_DAYS=3 and again at boot. So a pin keeps working
-// offline only on a machine that ran that exact version within ~3 days and has
-// not rebooted - no first run, no new laptop, no post-reboot. clco has no
-// offline path for browser control, and nothing here should imply otherwise.
-//
-// What @latest buys is that the server half stays in step with an extension
-// half that auto-updates from the Web Store and cannot be pinned alongside it.
-// How much version skew the pair tolerates is unknown, and deliberately not
-// asserted here: the shipped server carries no version-negotiation code for the
-// extension (0.0.80 is a thin shim over playwright-core 1.63.0-alpha, whose only
-// mismatch check is Playwright's own client/server one), and the connect-failure
-// reports - playwright-mcp #1090, #1452, #1571, #1579 - are not established to
-// be version skew. Treat the risk as real but unmeasured, not as a known break.
-//
-// Neither choice is a supply-chain control. The repo's bun.lock does not cover
-// this: the package is resolved by a bunx subprocess of claude, in its own
+// Neither spec is a supply-chain control. The repo's bun.lock does not cover
+// this package: it is resolved by a bunx subprocess of claude, in its own
 // generated lockfile, with no integrity hash clco ever sees. A pinned version
-// string is not verification, and must not be read as any.
+// string bounds the window and makes the choice attributable; it verifies
+// nothing.
 //
-// CLCO_MCP_PACKAGE overrides the spec for anyone whose situation this default
-// does not fit - an internal mirror, a prefetched version, or rolling back a
-// bad upstream release.
+// CLCO_MCP_PACKAGE overrides the spec - an internal mirror, a pinned version,
+// a rollback past a bad release.
 export const MCP_PACKAGE = "@playwright/mcp@latest"
 
 /** The spec clco will actually register, override included. */
@@ -191,29 +175,36 @@ export function parseToken(input: string): string | null | undefined {
   return TOKEN_SHAPE.test(cleaned) ? cleaned : null
 }
 
+/** Why browser control will or will not work, in the words the user needs. */
+export type RegistryStatus = "ok" | "tls" | "blocked"
+
 /**
- * Whether the registry is actually reachable.
+ * Whether the registry can actually be reached, and if not, why.
  *
  * The package is resolved from npm at session start, so on a network that
- * blocks or proxies it the server never starts — and the failure would
+ * blocks or re-signs it the server never starts - and the failure would
  * otherwise surface only as an MCP connection error inside claude, with clco's
  * own startup line still claiming success. This has to be a real request: an
  * earlier version ran `bunx --version`, which prints locally and therefore
- * returned "reachable" on an air-gapped machine, so the warning could never
- * fire on the networks it was written for.
+ * returned "reachable" on an air-gapped machine.
+ *
+ * A TLS rejection is reported apart from a block because they need different
+ * things from the user - one needs their company CA, the other cannot be fixed
+ * from here at all.
  */
-export async function registryReachable(timeoutMs = 2500): Promise<boolean> {
+export async function registryStatus(timeoutMs = 2500): Promise<RegistryStatus> {
   try {
     // copilotFetch, so a corporate CA applies here exactly as it does to the
-    // Copilot calls — otherwise this would report "blocked" on the very
+    // Copilot calls - otherwise this would report "blocked" on the very
     // networks the CA support exists for.
     const res = await copilotFetch(
       "https://registry.npmjs.org/@playwright/mcp",
       { method: "HEAD", signal: AbortSignal.timeout(timeoutMs) },
     )
-    return res.ok
-  } catch {
-    return false
+    return res.ok ? "ok" : "blocked"
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err)
+    return isTlsTrustError(message) ? "tls" : "blocked"
   }
 }
 
@@ -229,8 +220,8 @@ export function startupLine(
   token?: string,
   /** bunx ships with bun, which the installer guarantees; npx is a fallback. */
   hasRunner = Bun.which("bunx") !== null || Bun.which("npx") !== null,
-  /** Undefined when not checked; false when the registry is unreachable. */
-  reachable?: boolean,
+  /** Undefined when not checked. */
+  registry?: RegistryStatus,
   /** False when clco stood aside for a user-supplied --mcp-config. */
   registered?: boolean,
   pkg = mcpPackage(),
@@ -245,9 +236,16 @@ export function startupLine(
   if (registered === false) {
     return "! browser: skipped - your own --mcp-config takes over"
   }
-  if (reachable === false) {
+  if (registry === "tls") {
     return (
-      "! browser: cannot reach the npm registry - Playwright MCP is fetched at" +
+      `! browser: TLS rejected by registry.npmjs.org - ${pkg} is fetched at` +
+      " session start, so browser tools will not appear." +
+      " Set CLCO_CA_BUNDLE to your company CA."
+    )
+  }
+  if (registry === "blocked") {
+    return (
+      `! browser: cannot reach registry.npmjs.org - ${pkg} is fetched at` +
       " session start, so browser tools will not appear"
     )
   }
