@@ -25,7 +25,7 @@ import {
 import { setAdapterLogSink, startServer } from "./server"
 import { buildModelPickerFrom, resolveClaude, runClaude } from "./spawn"
 import { TLS_HINT, isTlsTrustError } from "./tls"
-import { extensionHint, extensionInstalled } from "./browsermcp"
+import { extensionHint, installedVariant } from "./browsermcp"
 import {
   loadSetup,
   runSetup,
@@ -354,7 +354,7 @@ async function reportChromeCaveat(): Promise<void> {
     )
   }
   if (prefs.setup?.browser) {
-    console.log("\n" + extensionHint(await extensionInstalled()))
+    console.log("\n" + extensionHint(await installedVariant()))
   }
 }
 
@@ -591,7 +591,12 @@ async function main(): Promise<void> {
     models,
     defaultModel,
     claudeArgs: [
-      ...setupClaudeArgs(setup, args.overrides, args.claudeArgs),
+      ...setupClaudeArgs(
+        setup,
+        args.overrides,
+        args.claudeArgs,
+        await installedVariant(),
+      ),
       ...args.claudeArgs,
     ],
   })

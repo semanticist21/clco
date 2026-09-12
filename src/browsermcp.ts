@@ -15,10 +15,50 @@ import { readdir } from "node:fs/promises"
 import { homedir, platform } from "node:os"
 import { join } from "node:path"
 
-export const BROWSER_MCP_PACKAGE = "@agent360/browser-mcp@latest"
-const EXTENSION_ID = "jdehgalffmffhfhmmhaokfbfnafnmgcl"
-export const EXTENSION_URL =
-  `https://chromewebstore.google.com/detail/agent360-browser-mcp/${EXTENSION_ID}`
+// Two unrelated projects ship under this name, each with its own extension
+// and npm package, and they are not interchangeable: the extension talks to
+// its own server. So detect which one is actually installed and register that
+// one, rather than picking for the user.
+export interface BrowserMcpVariant {
+  id: string
+  label: string
+  package: string
+  /** Extra CLI args the server needs to attach to the running browser. */
+  args: string[]
+  storeUrl: string
+}
+
+// Ordered by what should win when more than one is installed: Microsoft's
+// Playwright MCP first (~4.6M weekly npm downloads, actively released),
+// then the smaller projects. browsermcp.io is last because its npm package
+// has not been published since 2025-04 even though the extension still
+// installs — recommending it would be pointing at an unmaintained half.
+export const BROWSER_MCP_VARIANTS: readonly BrowserMcpVariant[] = [
+  {
+    id: "mmlmfjhmonkocbjadbfplnigmagldckm",
+    label: "Playwright MCP Bridge (Microsoft)",
+    package: "@playwright/mcp@latest",
+    args: ["--extension"],
+    storeUrl:
+      "https://chromewebstore.google.com/detail/playwright-extension/mmlmfjhmonkocbjadbfplnigmagldckm",
+  },
+  {
+    id: "jdehgalffmffhfhmmhaokfbfnafnmgcl",
+    label: "Agent360 Browser MCP",
+    package: "@agent360/browser-mcp@latest",
+    args: [],
+    storeUrl:
+      "https://chromewebstore.google.com/detail/agent360-browser-mcp/jdehgalffmffhfhmmhaokfbfnafnmgcl",
+  },
+  {
+    id: "bjfgambnhccakkhmkepdoekmckoijdlc",
+    label: "Browser MCP (browsermcp.io, unmaintained since 2025-04)",
+    package: "@browsermcp/mcp@latest",
+    args: [],
+    storeUrl:
+      "https://chromewebstore.google.com/detail/bjfgambnhccakkhmkepdoekmckoijdlc",
+  },
+]
 
 /** Chrome's per-profile extension directories, by platform. */
 function chromeRoots(home = homedir()): string[] {
@@ -49,7 +89,10 @@ function chromeRoots(home = homedir()): string[] {
  * conversation on a port in 9876-9895, so at clco startup nothing is listening
  * and a probe would report "missing" for a working install.
  */
-export async function extensionInstalled(home = homedir()): Promise<boolean> {
+export async function installedVariant(
+  home = homedir(),
+): Promise<BrowserMcpVariant | null> {
+  const present = new Set<string>()
   for (const root of chromeRoots(home)) {
     let profiles: string[]
     try {
@@ -59,29 +102,43 @@ export async function extensionInstalled(home = homedir()): Promise<boolean> {
     }
     for (const profile of profiles) {
       try {
-        const entries = await readdir(join(root, profile, "Extensions"))
-        if (entries.includes(EXTENSION_ID)) return true
+        for (const id of await readdir(join(root, profile, "Extensions"))) {
+          present.add(id)
+        }
       } catch {
         // not a profile directory, or no extensions in it
       }
     }
   }
-  return false
+  return BROWSER_MCP_VARIANTS.find((v) => present.has(v.id)) ?? null
 }
 
-/** The --mcp-config payload registering the server for this session only. */
-export function browserMcpConfig(): string {
+/**
+ * The --mcp-config payload registering the server for this session only.
+ * Null when no extension is installed: registering a server whose other half
+ * is missing only produces tools that fail on every call.
+ */
+export function browserMcpConfig(variant: BrowserMcpVariant | null): string | null {
+  if (!variant) return null
   return JSON.stringify({
     mcpServers: {
-      "browser-mcp": { command: "npx", args: ["-y", BROWSER_MCP_PACKAGE] },
+      "browser-mcp": {
+        command: "npx",
+        args: ["-y", variant.package, ...variant.args],
+      },
     },
   })
 }
 
-export function extensionHint(installed: boolean): string {
-  return installed
-    ? `Browser MCP extension detected. Tools arrive as mcp__browser-mcp__*.`
-    : `Browser MCP needs its Chrome extension, which is not installed yet:\n` +
-      `  ${EXTENSION_URL}\n` +
-      `  Until it is, the tools appear but every call fails.`
+export function extensionHint(variant: BrowserMcpVariant | null): string {
+  if (variant) {
+    return `${variant.label} detected - registering ${variant.package}.\n` +
+      `Tools arrive as mcp__browser-mcp__*.`
+  }
+  return (
+    "Browser MCP is two halves, and the Chrome extension is the half only you\n" +
+    "can install. Pick either, then re-run `clco setup`:\n" +
+    BROWSER_MCP_VARIANTS.map((v) => `  ${v.label}\n    ${v.storeUrl}`).join("\n") +
+    "\nUntil one is installed, clco registers no browser server."
+  )
 }
