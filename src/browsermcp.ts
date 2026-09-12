@@ -83,11 +83,24 @@ export async function extensionInstalled(home = homedir()): Promise<boolean> {
  * Null without the extension: the server is only half of it, and registering
  * it alone produces tools that fail on every call.
  */
-export function browserMcpConfig(installed: boolean): string | null {
+export function browserMcpConfig(
+  installed: boolean,
+  caBundlePath = process.env.CLCO_CA_BUNDLE,
+): string | null {
   if (!installed) return null
   return JSON.stringify({
     mcpServers: {
-      playwright: { command: "npx", args: ["-y", MCP_PACKAGE, "--extension"] },
+      playwright: {
+        command: "npx",
+        args: ["-y", MCP_PACKAGE, "--extension"],
+        // npx fetches from the registry over its own TLS, outside clco's
+        // copilotFetch, so a corporate CA has to be handed down explicitly -
+        // otherwise browser control is the one feature that still breaks on
+        // the network clco was hardened for.
+        ...(caBundlePath
+          ? { env: { NODE_EXTRA_CA_CERTS: caBundlePath } }
+          : {}),
+      },
     },
   })
 }
@@ -133,10 +146,15 @@ export function startupLine(
   enabled: boolean,
   installed: boolean,
   token?: string,
+  /** The installer guarantees bun, not Node - and the server runs under npx. */
+  hasNpx = Bun.which("npx") !== null,
 ): string | null {
   if (!enabled) return null
   if (!installed) {
     return `! browser: ${EXTENSION_NAME} not installed - ${EXTENSION_URL}`
+  }
+  if (!hasNpx) {
+    return "! browser: npx not found - Playwright MCP needs Node.js on PATH"
   }
   return `+ browser: Playwright MCP${token ? "" : " (connect dialog each session)"}`
 }

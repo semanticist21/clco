@@ -779,9 +779,19 @@ export class StreamTranslator {
 // ---------------------------------------------------------------------------
 
 export function estimateTokens(payload: AnthropicRequest): number {
+  // Base64 image payloads are megabytes of characters worth a fixed ~1.5k
+  // tokens, so counting them raw turns one pasted screenshot into a six-digit
+  // estimate. Replace each with its real cost before measuring.
+  const IMAGE_TOKENS = 1_600
+  let images = 0
+  const text = JSON.stringify(payload.messages ?? "", (key, value) =>
+    key === "data" && typeof value === "string" && value.length > 1024
+      ? (images++, "")
+      : value,
+  )
   const size =
-    JSON.stringify(payload.messages ?? "").length +
+    text.length +
     JSON.stringify(payload.system ?? "").length +
     JSON.stringify(payload.tools ?? "").length
-  return Math.ceil(size / 3.5)
+  return Math.ceil(size / 3.5) + images * IMAGE_TOKENS
 }

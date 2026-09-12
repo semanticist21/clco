@@ -43,8 +43,14 @@ export function caBundle(): string[] | undefined {
     resolved = null
     return undefined
   }
-  // Union, never replace.
-  resolved = [...getCACertificates("default"), ...extra]
+  try {
+    // Union, never replace.
+    resolved = [...getCACertificates("default"), ...extra]
+  } catch {
+    // An older Bun without the default store: still better to trust the extra
+    // CA than to let the throw turn every upstream request into a 502.
+    resolved = extra
+  }
   return resolved
 }
 

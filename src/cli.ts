@@ -53,35 +53,6 @@ const VERSION: string = await (async () => {
   }
 })()
 
-const HELP = `clco v${VERSION} — run Claude Code on your GitHub Copilot subscription
-
-Usage:
-  clco [--port N] [claude args...]
-      GitHub auth (first run only) -> pick a model -> start the local
-      adapter -> launch claude. Any dashed argument clco does not own is
-      passed straight through:
-        clco --chrome / clco --dangerously-skip-permissions / clco -p "ask"
-      The model prompt is skipped for -p and in non-interactive shells.
-  clco serve [--port N]
-      Run only the adapter; point your own claude at it
-  clco status
-      Show the account, plan, and each model's route/policy/context
-  clco login
-      (Re)authenticate via GitHub device flow; also switches accounts
-  clco logout
-      Delete the stored GitHub token
-  clco update
-      Update this install to the latest revision (git pull + deps)
-  clco help
-
-Environment:
-  CLCO_UPSTREAM           Override the upstream base URL (mock testing; skips auth)
-  CLCO_OPUS/SONNET/HAIKU  Override the model slug for a slot
-  CLCO_NO_SELECT=1        Skip the startup model prompt
-  CLCO_NO_PASSTHROUGH=1   Disable the native /v1/messages route (always translate)
-  CLCO_EDITOR_VERSION / CLCO_CHAT_VERSION  Override the client identity versions
-`
-
 interface Args {
   command:
     | "run" | "serve" | "auth" | "login" | "logout" | "update" | "status"
@@ -92,26 +63,58 @@ interface Args {
   claudeArgs: string[]
 }
 
-// Our own vocabulary is tiny (serve/auth/login/logout/update/--port/help).
-// Anything else before `--` is a typo — fail loudly with the command list
-// instead of silently launching a conversation. claude args go after `--`.
-const COMMAND_LIST = `Commands:
-  clco                 Start a session (prompts for a model)
-  clco serve           Run only the adapter
-  clco login|auth      (Re)authenticate with GitHub
-  clco logout          Delete the stored token
-  clco update          Update to the latest revision
-  clco status          Show account, model policy, and routing
-  clco setup           Set startup defaults (permissions, chrome, model prompt)
-  clco --port N        Pin the adapter port
-  clco --no-bypass     Re-enable permission prompts for this run
-  clco --no-select     Skip the model prompt for this run
-  clco --no-browser    Skip the Browser MCP server for this run
-  clco help            Show this help
-  clco version         Print the version
-  clco token           Store the Playwright MCP token (reads stdin)
+// One list, two renderings: help and the typo path used to drift apart, and
+// the typo path was the only place `setup` was mentioned.
+const COMMANDS: ReadonlyArray<[string, string]> = [
+  ["clco", "Start a session (prompts for a model)"],
+  ["clco serve", "Run only the adapter; point your own claude at it"],
+  ["clco status", "Show account, plan, model policy and routing"],
+  ["clco setup", "Set startup defaults (permissions, browser control, model prompt)"],
+  ["clco token", "Store the Playwright MCP token: pbpaste | clco token"],
+  ["clco token --clear", "Remove the stored token"],
+  ["clco login|auth", "(Re)authenticate with GitHub; also switches accounts"],
+  ["clco logout", "Delete the stored GitHub token"],
+  ["clco update", "Update this install to the latest revision"],
+  ["clco version", "Print the version"],
+  ["clco help", "Show this help"],
+  ["clco --port N", "Pin the adapter port"],
+  ["clco --no-bypass", "Re-enable permission prompts for this run"],
+  ["clco --no-select", "Skip the model prompt for this run"],
+  ["clco --no-browser", "Skip Playwright MCP for this run"],
+]
 
-claude args pass through:  clco -p "ask"  /  clco --chrome  /  clco --dangerously-skip-permissions`
+const ENVIRONMENT: ReadonlyArray<[string, string]> = [
+  ["CLCO_CA_BUNDLE", "CA file(s) to add to the OS trust store (TLS-inspecting proxies)"],
+  ["CLCO_OPUS/SONNET/HAIKU/FABLE", "Override the model slug for a slot"],
+  ["CLCO_MIN_WINDOW", "Hide models with a smaller context window"],
+  ["CLCO_SHOW_INTERNAL", "Also list Copilot's internal search/exec models"],
+  ["CLCO_NO_SELECT=1", "Skip the startup model prompt"],
+  ["CLCO_NO_PASSTHROUGH=1", "Disable the native /v1/messages route (always translate)"],
+  ["CLCO_DEBUG=1", "Write adapter request logs to ~/.config/clco/adapter.log"],
+  ["CLCO_UPSTREAM", "Override the upstream base URL (mock testing; skips auth)"],
+]
+
+const pad = (rows: ReadonlyArray<[string, string]>, width: number) =>
+  rows.map(([k, v]) => `  ${k.padEnd(width)} ${v}`).join("\n")
+
+export const COMMAND_LIST = `Commands:\n${pad(COMMANDS, 20)}`
+
+const HELP = `clco v${VERSION} — run Claude Code on your GitHub Copilot subscription
+
+Usage:
+  clco [--port N] [claude args...]
+      GitHub auth (first run only) -> pick a model -> start the local
+      adapter -> launch claude. Any dashed argument clco does not own is
+      passed straight through:
+        clco -p "ask"  /  clco --resume  /  clco --model gpt-4.1
+      The first interactive run also asks for your startup defaults.
+
+${COMMAND_LIST}
+
+Environment:
+${pad(ENVIRONMENT, 28)}
+
+claude's own flags pass through unchanged.`
 
 export function parseArgs(rawArgv: string[]): Args {
   // The launcher replaces a leading "--" with this sentinel because bun
@@ -366,25 +369,37 @@ async function runStatus(): Promise<void> {
 // A terminal submits a text prompt at the first newline, so pasting anything
 // with a trailing line break loses the rest — and the leftover runs as shell
 // input. Reading stdin sidesteps that entirely: `pbpaste | clco token`.
-async function runToken(): Promise<void> {
-  const raw = await new Response(Bun.stdin.stream()).text()
-  const parsed = parseToken(raw)
+async function runToken(clear = false): Promise<void> {
+  const prefs = await loadPrefs()
+  if (!prefs.setup) {
+    throw new Error("Run `clco setup` first, then store the token.")
+  }
+  if (clear) {
+    await savePrefs({ ...prefs, setup: { ...prefs.setup, browserToken: undefined } })
+    console.log("+ token cleared (sessions show the connect dialog)")
+    return
+  }
+  // Reading stdin on a terminal waits forever, and this is the command the
+  // setup outro tells people to run.
+  if (process.stdin.isTTY) {
+    throw new Error(
+      "usage: pbpaste | clco token   (or `clco token --clear` to remove it)",
+    )
+  }
+  const parsed = parseToken(await new Response(Bun.stdin.stream()).text())
   if (parsed === null) {
     throw new Error(
       "That does not look like the token - it is a long string of letters, digits, - and _.",
     )
   }
-  const prefs = await loadPrefs()
-  if (!prefs.setup) {
-    throw new Error("Run `clco setup` first, then store the token.")
+  // An empty pipe is an accident, not a request to delete a working token.
+  if (parsed === undefined) {
+    throw new Error(
+      "nothing on stdin - to remove a stored token, run `clco token --clear`",
+    )
   }
-  await savePrefs({
-    ...prefs,
-    setup: { ...prefs.setup, browserToken: parsed ?? undefined },
-  })
-  console.log(
-    parsed ? "+ token stored" : "+ token cleared (sessions show the connect dialog)",
-  )
+  await savePrefs({ ...prefs, setup: { ...prefs.setup, browserToken: parsed } })
+  console.log("+ token stored")
 }
 
 async function reportBrowserNotes(): Promise<void> {
@@ -466,7 +481,7 @@ async function main(): Promise<void> {
   }
 
   if (args.command === "token") {
-    await runToken()
+    await runToken(args.claudeArgs.includes("--clear"))
     return
   }
 

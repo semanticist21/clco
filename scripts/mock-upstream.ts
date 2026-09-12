@@ -22,9 +22,12 @@ Bun.serve({
           { id: "mock-chat", supported_endpoints: ["/chat/completions"] },
         ].map((m) => ({
           ...m,
-          model_picker_enabled: true,
+          // Matches production: GitHub returns false for every model.
+          model_picker_enabled: false,
           policy: { state: "enabled" },
           capabilities: {
+            type: "chat",
+            family: m.id,
             limits: { max_prompt_tokens: 200000, max_context_window_tokens: 264000 },
             supports: { reasoning_effort: ["low", "medium", "high", "xhigh", "max"] },
           },

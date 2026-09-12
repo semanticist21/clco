@@ -57,7 +57,7 @@ describe("buildModelPickerFrom", () => {
     // A non-catalog id needs behavesAs or claude silently declines the row,
     // and the target must be a real catalog id — never a family alias.
     expect(picker.options[1]).toEqual({
-      model: "gpt-5.6-luna[1m]",
+      model: "gpt-5.6-luna",
       label: "Luna 5.6",
       description: "gpt-5.6-luna · responses · 328k · no effort tiers",
       behavesAs: "claude-opus-5",
@@ -90,16 +90,21 @@ describe("buildModelPickerFrom", () => {
     }
   })
 
-  test("[1m] is claimed only above the default ceiling", () => {
+  // [1m] tells Claude Code the model has a 1M window, and server.ts only
+  // forwards the matching beta at a real 1M. Claiming it below that told the
+  // client 1M while delivering 200k - the two must agree on the threshold.
+  test("[1m] is claimed only at a real 1M window", () => {
     const picker = buildModelPickerFrom([
       model({ id: "small", maxPromptTokens: 12288 }),
-      model({ id: "exact", maxPromptTokens: 200000 }),
+      model({ id: "mid", maxPromptTokens: 272000 }),
       model({ id: "big", maxPromptTokens: 917504 }),
+      model({ id: "huge", maxPromptTokens: 1000000 }),
     ])!
-    const by = (id: string) => picker.options.find((o) => o.model.startsWith(id))!
+    const by = (id: string) => picker.options.find((o) => o.description!.startsWith(id))!
     expect(by("small").model).toBe("small")
-    expect(by("exact").model).toBe("exact")
-    expect(by("big").model).toBe("big[1m]")
+    expect(by("mid").model).toBe("mid")
+    expect(by("big").model).toBe("big")
+    expect(by("huge").model).toBe("huge[1m]")
   })
 
   test("models that cannot hold a conversation are excluded", () => {
@@ -245,16 +250,30 @@ describe("internal Copilot plumbing", () => {
       m("trajectory-compaction", "trajectory-compaction"),
       m("gpt-4o", "gpt-4o"),
     ])!
-    expect(picker.options.map((o) => o.model)).toEqual(["gpt-4o[1m]"])
+    expect(picker.options.map((o) => o.model)).toEqual(["gpt-4o"])
   })
 
   test("CLCO_SHOW_INTERNAL brings them back", () => {
+    const prev = process.env.CLCO_SHOW_INTERNAL
     process.env.CLCO_SHOW_INTERNAL = "1"
     try {
       const picker = buildModelPickerFrom([m("copilot-search-a", "search-agent")])!
       expect(picker.options).toHaveLength(1)
     } finally {
-      delete process.env.CLCO_SHOW_INTERNAL
+      if (prev === undefined) delete process.env.CLCO_SHOW_INTERNAL
+      else process.env.CLCO_SHOW_INTERNAL = prev
     }
+  })
+})
+
+describe("buildSettingsEnv — what must not be there", () => {
+  const models = { opus: "o", sonnet: "s", haiku: "h", fable: "f" }
+
+  // Gateway discovery wrote a dead adapter port into the user's own
+  // ~/.claude/cache/gateway-models.json. It is now absent rather than set to
+  // "0", and an absence survives no refactor unless something asserts it.
+  test("gateway discovery stays off, so nothing writes into ~/.claude", () => {
+    const env = buildSettingsEnv("http://127.0.0.1:1", models, "m", null)
+    expect(env.CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY).toBeUndefined()
   })
 })

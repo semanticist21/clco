@@ -749,3 +749,33 @@ describe("model alias table", () => {
     }
   })
 })
+
+describe("estimateTokens", () => {
+  const wrap = (content: unknown) =>
+    ({
+      model: "m",
+      max_tokens: 16,
+      messages: [{ role: "user", content }],
+    }) as Parameters<typeof estimateTokens>[0]
+
+  // A 1MB screenshot is ~1.4M base64 characters worth roughly 1.5k tokens.
+  // Counting the characters made it ~400k, which tripped the adapter's
+  // pre-flight guard and returned a 400 telling the user to /compact.
+  test("counts an image at its real cost, not its base64 length", () => {
+    const withImage = estimateTokens(
+      wrap([
+        { type: "image", source: { type: "base64", media_type: "image/png", data: "A".repeat(1_400_000) } },
+        { type: "text", text: "look at this" },
+      ]),
+    )
+    expect(withImage).toBeLessThan(5_000)
+    // Still counted, just not by the byte.
+    expect(withImage).toBeGreaterThan(estimateTokens(wrap([{ type: "text", text: "look at this" }])))
+  })
+
+  test("still scales with actual text", () => {
+    const small = estimateTokens(wrap("hi"))
+    const large = estimateTokens(wrap("x".repeat(70_000)))
+    expect(large).toBeGreaterThan(small * 100)
+  })
+})

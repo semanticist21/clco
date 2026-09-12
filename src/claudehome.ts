@@ -13,7 +13,18 @@
 // same split Anthropic's own self-hosted runner makes when it seeds a config
 // dir ("settings, agents/, skills/, …; runtime state excluded").
 
-import { readFile, readdir, rm, symlink, writeFile, mkdir, lstat, copyFile } from "node:fs/promises"
+import {
+  copyFile,
+  lstat,
+  mkdir,
+  readFile,
+  readdir,
+  readlink,
+  rename,
+  rm,
+  symlink,
+  writeFile,
+} from "node:fs/promises"
 import { homedir } from "node:os"
 import { join } from "node:path"
 
@@ -26,6 +37,51 @@ const PRIVATE_ENTRIES = new Set([
   "settings.local.json",
   "backups",
 ])
+
+/**
+ * Keep claude's settings private, without letting a Copilot slug survive in
+ * them. Three cases the previous version got wrong: a missing ~/.claude
+ * settings.json left the private copy (and its stale `model`) untouched; a
+ * JSONC one was copied verbatim, `model` and all; and rewriting from the
+ * user's file every launch discarded whatever claude had persisted in the
+ * private one.
+ */
+async function writeSettings(real: string, home: string): Promise<void> {
+  const target = join(home, "settings.json")
+  let source: string | null = null
+  try {
+    source = await readFile(join(real, "settings.json"), "utf8")
+  } catch {
+    // No global settings: keep what is already private, minus `model`.
+  }
+  const existing = await readFile(target, "utf8").catch(() => null)
+  const raw = source ?? existing
+  if (raw === null) return
+  try {
+    const parsed = JSON.parse(raw) as Record<string, unknown>
+    delete parsed.model
+    await atomicWrite(target, JSON.stringify(parsed, null, 2) + "\n")
+  } catch {
+    // claude tolerates comments where JSON.parse does not, so keep the file
+    // and strip only the key that must not carry over.
+    await atomicWrite(
+      target,
+      raw.replace(/^\s*"model"\s*:\s*("(?:[^"\\]|\\.)*"|null)\s*,?\s*$/gm, ""),
+    )
+  }
+}
+
+// A second clco launch refreshes this file while the first session may be
+// reading it; config.ts already writes auth.json this way.
+async function atomicWrite(path: string, data: string): Promise<void> {
+  const tmp = `${path}.tmp.${process.pid}`
+  try {
+    await writeFile(tmp, data, { mode: 0o600 })
+    await rename(tmp, path)
+  } catch {
+    await rm(tmp, { force: true }).catch(() => {})
+  }
+}
 
 export function claudeHome(home = homedir()): string {
   return join(home, ".config", "clco", "claude-home")
@@ -44,16 +100,31 @@ export async function prepareClaudeHome(
 ): Promise<string | null> {
   const real = join(userHome, ".claude")
   const home = claudeHome(userHome)
+  // A missing ~/.claude is no reason to skip isolation - the private dir works
+  // fine empty. Only a real read failure is a problem, and returning null then
+  // hands the child the user's own config dir, where a /model pick persists.
+  // That must never happen quietly.
   let entries: string[]
   try {
     entries = await readdir(real)
-  } catch {
-    return null
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== "ENOENT") {
+      console.error(
+        `[clco] cannot read ${real} (${(err as Error).message}) - refusing to run` +
+          " against your own claude config, where a /model pick would persist.",
+      )
+      throw err
+    }
+    entries = []
   }
   try {
     await mkdir(home, { recursive: true, mode: 0o700 })
-  } catch {
-    return null
+  } catch (err) {
+    console.error(
+      `[clco] cannot create ${home} (${(err as Error).message}) - refusing to run` +
+        " against your own claude config, where a /model pick would persist.",
+    )
+    throw err
   }
 
   for (const name of entries) {
@@ -62,9 +133,11 @@ export async function prepareClaudeHome(
     const target = join(real, name)
     try {
       const existing = await lstat(link).catch(() => null)
-      if (existing?.isSymbolicLink()) continue
-      // A real file here would be a leftover from an older layout; the shared
-      // original is authoritative.
+      if (existing?.isSymbolicLink()) {
+        // Trusting an existing link without checking left ones pointing at a
+        // previous $HOME pointing there forever.
+        if ((await readlink(link).catch(() => null)) === target) continue
+      }
       if (existing) await rm(link, { recursive: true, force: true })
       await symlink(target, link)
     } catch {
@@ -72,25 +145,19 @@ export async function prepareClaudeHome(
     }
   }
 
-  // Seed the settings claude will read, minus the one key it writes back —
-  // otherwise a slug left over from an earlier session would seed the next.
-  try {
-    const raw = await readFile(join(real, "settings.json"), "utf8")
-    const parsed = JSON.parse(raw) as Record<string, unknown>
-    delete parsed.model
-    await writeFile(
-      join(home, "settings.json"),
-      JSON.stringify(parsed, null, 2) + "\n",
-      { mode: 0o600 },
-    )
-  } catch {
-    // No settings, or not strict JSON (claude tolerates JSONC). Copy it
-    // verbatim rather than dropping the user's configuration entirely.
-    await copyFile(
-      join(real, "settings.json"),
-      join(home, "settings.json"),
-    ).catch(() => {})
+  // Reap links whose source is gone: the loop above only visits what exists
+  // now, so a deleted entry otherwise dangles here forever.
+  const live = new Set(entries)
+  for (const name of await readdir(home).catch(() => [])) {
+    if (PRIVATE_ENTRIES.has(name) || live.has(name) || name === ".claude.json") {
+      continue
+    }
+    const link = join(home, name)
+    const stat = await lstat(link).catch(() => null)
+    if (stat?.isSymbolicLink()) await rm(link, { force: true }).catch(() => {})
   }
+
+  await writeSettings(real, home)
 
   // Trust decisions, MCP servers and project history live here. Seeded once so
   // the first clco session inherits them, then left alone: from that point it

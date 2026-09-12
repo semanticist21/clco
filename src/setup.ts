@@ -49,7 +49,13 @@ export async function runSetup(): Promise<SetupPrefs> {
   // Sequential rather than one object literal: the browser follow-ups have to
   // run between the browser answer and the next question, and inside a literal
   // every property is evaluated before any code after it.
-  const setup: SetupPrefs = { ...SETUP_DEFAULTS, version: SETUP_VERSION }
+  const setup: SetupPrefs = {
+    ...SETUP_DEFAULTS,
+    version: SETUP_VERSION,
+    // Carried regardless of the answers below: turning browser control off for
+    // a while should not make the user paste the token again afterwards.
+    browserToken: current.browserToken,
+  }
 
   setup.bypass = await ask(
     "Run without permission prompts? (--dangerously-skip-permissions)",
@@ -131,12 +137,17 @@ export function setupClaudeArgs(
   browserExtension = false,
 ): string[] {
   if (!setup) return []
-  const has = (flag: string) => claudeArgs.some((a) => a === flag)
+  // Match the `--flag=value` form too: an exact comparison let a user's own
+  // --mcp-config=x.json through, and clco then injected a second one.
+  const has = (flag: string) =>
+    claudeArgs.some((a) => a === flag || a.startsWith(`${flag}=`))
   const out: string[] = []
   if (
     setup.bypass &&
     overrides.bypass !== false &&
-    !has("--dangerously-skip-permissions")
+    !has("--dangerously-skip-permissions") &&
+    // An explicit permission mode is a deliberate choice; do not override it.
+    !has("--permission-mode")
   ) {
     out.push("--dangerously-skip-permissions")
   }
@@ -145,7 +156,7 @@ export function setupClaudeArgs(
   if (
     setup.browser &&
     overrides.browser !== false &&
-    !claudeArgs.includes("--mcp-config")
+    !has("--mcp-config")
   ) {
     const config = browserMcpConfig(browserExtension)
     if (config) out.push("--mcp-config", config)

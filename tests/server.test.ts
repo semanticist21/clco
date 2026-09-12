@@ -9,7 +9,8 @@ import {
   startServer,
   type ServerHandle,
 } from "../src/server"
-import { discoverModels } from "../src/token"
+import { discoverModels, upstreamModels } from "../src/token"
+import { buildModelPickerFrom } from "../src/spawn"
 
 let upstream: ReturnType<typeof Bun.serve>
 let adapter: ServerHandle
@@ -133,16 +134,20 @@ beforeAll(async () => {
       if (url.pathname === "/models") {
         return Response.json({
           data: [
-            { id: "mock-sonnet", name: "Mock Sonnet" },
-            { id: "mock-opus", name: "Mock Opus" },
-            { id: "mock-luna" },
+            // Production shape: GitHub returns model_picker_enabled:false for
+            // every model, which is why honouring it emptied /model entirely.
+            { id: "mock-sonnet", name: "Mock Sonnet", model_picker_enabled: false },
+            { id: "mock-opus", name: "Mock Opus", model_picker_enabled: false },
+            { id: "mock-luna", model_picker_enabled: false },
             {
               id: "mock-native",
               name: "Mock Native",
               supported_endpoints: ["/v1/messages", "/chat/completions"],
-              model_picker_enabled: true,
+              model_picker_enabled: false,
               policy: { state: "enabled" },
               capabilities: {
+                type: "chat",
+                family: "mock-native",
                 limits: { max_prompt_tokens: 200000, max_context_window_tokens: 264000 },
                 supports: { reasoning_effort: ["low", "medium", "high"] },
               },
@@ -150,11 +155,13 @@ beforeAll(async () => {
             {
               id: "mock-native-reject",
               supported_endpoints: ["/v1/messages", "/chat/completions"],
+              model_picker_enabled: false,
             },
             // The real GPT-5.x "luna" shape: Responses API only.
             {
               id: "mock-responses-only",
               supported_endpoints: ["/responses"],
+              model_picker_enabled: false,
             },
           ],
         })
@@ -690,5 +697,22 @@ describe("dialect routing", () => {
     // would burn one upstream request per model — a real charge on a metered
     // plan. The learned fallback still covers a wrong declaration.
     expect(upstreamPaths).toEqual(["/responses"])
+  })
+})
+
+describe("the picker against a raw /models payload", () => {
+  // The bug this whole feature exists to fix lived in the mapping from
+  // model_picker_enabled to pickerEnabled, which no test crossed: every
+  // picker test hand-built its own objects. A filter reintroduced at the
+  // token.ts layer would leave /model empty with the suite still green.
+  test("a payload with picker disabled everywhere still yields a lineup", async () => {
+    const models = upstreamModels()
+    expect(models.length).toBeGreaterThan(0)
+    expect(models.every((m) => m.pickerEnabled === false)).toBe(true)
+    const picker = buildModelPickerFrom(models)
+    expect(picker).not.toBeNull()
+    expect(picker!.options.length).toBe(
+      models.filter((m) => m.type === undefined || m.type === "chat").length,
+    )
   })
 })

@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test"
+import { afterEach, beforeEach, describe, expect, test } from "bun:test"
 import {
   MCP_PACKAGE,
   browserMcpConfig,
@@ -117,6 +117,19 @@ describe("browser control", () => {
 
 describe("extension token", () => {
   const withToken = { ...saved({ browser: true }), browserToken: "tok123" }
+  // setupEnv reads this variable, and it is the one clco tells users to
+  // export - without isolating it the suite fails for anyone who followed
+  // that advice, and passes here only by accident.
+  const KEY = "PLAYWRIGHT_MCP_EXTENSION_TOKEN"
+  let saved_env: string | undefined
+  beforeEach(() => {
+    saved_env = process.env[KEY]
+    delete process.env[KEY]
+  })
+  afterEach(() => {
+    if (saved_env === undefined) delete process.env[KEY]
+    else process.env[KEY] = saved_env
+  })
 
   test("is passed to the child so sessions skip the connect dialog", () => {
     expect(setupEnv(withToken, {})).toEqual({
@@ -125,12 +138,8 @@ describe("extension token", () => {
   })
 
   test("an exported value wins over the stored one", () => {
-    process.env.PLAYWRIGHT_MCP_EXTENSION_TOKEN = "from-shell"
-    try {
-      expect(setupEnv(withToken, {})).toEqual({})
-    } finally {
-      delete process.env.PLAYWRIGHT_MCP_EXTENSION_TOKEN
-    }
+    process.env[KEY] = "from-shell"
+    expect(setupEnv(withToken, {})).toEqual({})
   })
 
   test("nothing to pass without a token, or with browser off for the run", () => {
@@ -197,5 +206,28 @@ describe("startup line", () => {
   // Nothing to say when browser control is off, or off for this run.
   test("stays quiet when the feature is not in play", () => {
     expect(startupLine(false, true, "tok")).toBeNull()
+  })
+})
+
+describe("browser MCP under a TLS-inspecting proxy", () => {
+  // npx fetches from the npm registry over its own TLS, outside clco's
+  // copilotFetch, so without this the browser feature is the one part that
+  // still fails on the network the CA work exists for.
+  test("hands the corporate CA down to the MCP child", () => {
+    const server = JSON.parse(browserMcpConfig(true, "/tmp/ca.pem")!)
+      .mcpServers.playwright
+    expect(server.env).toEqual({ NODE_EXTRA_CA_CERTS: "/tmp/ca.pem" })
+  })
+
+  test("sets no env when no CA is configured", () => {
+    expect(JSON.parse(browserMcpConfig(true, undefined)!).mcpServers.playwright.env)
+      .toBeUndefined()
+  })
+
+  // The installer guarantees bun, not Node, while startupLine would otherwise
+  // report success for a server that cannot spawn.
+  test("says so when npx is missing", () => {
+    expect(startupLine(true, true, "tok", false)).toContain("npx not found")
+    expect(startupLine(true, true, "tok", true)).not.toContain("npx")
   })
 })

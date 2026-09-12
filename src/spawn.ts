@@ -35,8 +35,11 @@ const INTERNAL_FAMILIES = new Set([
   "trajectory-compaction",
 ])
 
-/** Above this, Claude Code needs the [1m] suffix to unlock the real window. */
-const DEFAULT_WINDOW_CEILING = 200_000
+// The [1m] suffix is what Claude Code reads as "this model has a 1M window",
+// and server.ts only forwards the matching beta at a real 1M. Claiming it for
+// anything smaller told the client a 224k model was 1M while delivering
+// nothing — an overclaim in exactly the direction that delays auto-compact.
+const ONE_MILLION = 1_000_000
 
 export function windowOf(m: UpstreamModel): number | undefined {
   return m.maxPromptTokens ?? m.maxContextTokens
@@ -203,9 +206,9 @@ export function buildModelPickerFrom(
 
     const ctx = windowOf(m)
     // [1m] is the only per-row window channel the schema has, and it is
-    // binary. Claim it only where the model genuinely exceeds the default
-    // ceiling — overclaiming a small model is the dangerous direction.
-    const suffix = (ctx ?? 0) > DEFAULT_WINDOW_CEILING ? "[1m]" : ""
+    // binary: 200k or 1M, nothing between. The real window goes in the
+    // description instead.
+    const suffix = (ctx ?? 0) >= ONE_MILLION ? "[1m]" : ""
     // Several slugs share one display name (five are "GPT-4o", two are
     // "GPT-5.6 Luna"), so the subtitle leads with the id: it tells the rows
     // apart without cluttering every title with a parenthetical.

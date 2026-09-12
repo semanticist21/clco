@@ -1,5 +1,14 @@
 import { describe, expect, test } from "bun:test"
-import { mkdir, readFile, readdir, rm, writeFile, lstat } from "node:fs/promises"
+import {
+  lstat,
+  mkdir,
+  readFile,
+  readdir,
+  readlink,
+  rm,
+  symlink,
+  writeFile,
+} from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 
@@ -64,10 +73,82 @@ describe("prepareClaudeHome", () => {
     await rm(home, { recursive: true, force: true })
   })
 
-  test("returns null when there is no config dir to mirror", async () => {
+  // Returning null hands the child the user's own ~/.claude, where a /model
+  // pick persists - and the snapshot/restore that used to cover that is gone.
+  // A missing ~/.claude is no reason to give that up; the private dir works
+  // fine empty.
+  test("isolates even when there is no ~/.claude to mirror", async () => {
     const home = join(tmpdir(), `clco-empty-${Date.now()}`)
     await mkdir(home, { recursive: true })
-    expect(await run(home)).toBeNull()
+    const dir = await run(home)
+    expect(dir).not.toBeNull()
+    expect((await lstat(dir!)).isDirectory()).toBe(true)
+    await rm(home, { recursive: true, force: true })
+  })
+
+  test("drops a link whose source is gone, and re-points a stale one", async () => {
+    const home = join(tmpdir(), `clco-stale-${Date.now()}`)
+    const real = join(home, ".claude")
+    await mkdir(join(real, "skills"), { recursive: true })
+    await writeFile(join(real, "temp.md"), "x")
+    const dir = (await run(home))!
+    expect(await readdir(dir)).toContain("temp.md")
+
+    // Source removed: the link would otherwise dangle here forever.
+    await rm(join(real, "temp.md"))
+    await run(home)
+    expect(await readdir(dir)).not.toContain("temp.md")
+
+    // A link left pointing at a previous $HOME was trusted unconditionally.
+    await rm(join(dir, "skills"))
+    await symlink("/nonexistent/skills", join(dir, "skills"))
+    await run(home)
+    expect(await readlink(join(dir, "skills"))).toBe(join(real, "skills"))
+
+    await rm(home, { recursive: true, force: true })
+  })
+
+  test("strips the model key from a settings.json claude tolerates but JSON.parse does not", async () => {
+    const home = join(tmpdir(), `clco-jsonc-${Date.now()}`)
+    const real = join(home, ".claude")
+    await mkdir(real, { recursive: true })
+    await writeFile(
+      join(real, "settings.json"),
+      '{\n  // a comment claude accepts\n  "model": "gpt-4.1",\n  "env": {}\n}',
+    )
+    const dir = (await run(home))!
+    expect(await readFile(join(dir, "settings.json"), "utf8")).not.toContain("gpt-4.1")
+    await rm(home, { recursive: true, force: true })
+  })
+
+  // With no global settings.json the private copy was never rewritten, so a
+  // slug claude wrote there in an earlier session survived every launch.
+  test("strips a stale model key even with no global settings.json", async () => {
+    const home = join(tmpdir(), `clco-nosettings-${Date.now()}`)
+    await mkdir(join(home, ".claude"), { recursive: true })
+    const dir = (await run(home))!
+    await writeFile(
+      join(dir, "settings.json"),
+      JSON.stringify({ model: "kimi-k3", outputStyle: "keep-me" }),
+    )
+    await run(home)
+    const after = JSON.parse(await readFile(join(dir, "settings.json"), "utf8"))
+    expect(after.model).toBeUndefined()
+    expect(after.outputStyle).toBe("keep-me")
+    await rm(home, { recursive: true, force: true })
+  })
+
+  test("every private entry stays a real file, never a link back", async () => {
+    const home = join(tmpdir(), `clco-private-${Date.now()}`)
+    const real = join(home, ".claude")
+    await mkdir(join(real, "backups"), { recursive: true })
+    await writeFile(join(real, "settings.json"), "{}")
+    await writeFile(join(real, "settings.local.json"), "{}")
+    const dir = (await run(home))!
+    for (const name of ["settings.json", "settings.local.json", "backups"]) {
+      const s = await lstat(join(dir, name)).catch(() => null)
+      expect(s?.isSymbolicLink() ?? false).toBe(false)
+    }
     await rm(home, { recursive: true, force: true })
   })
 })
