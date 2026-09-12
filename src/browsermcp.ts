@@ -269,6 +269,30 @@ export async function registryStatus(
 }
 
 /**
+ * Fold a status line to the terminal, continuing with a two-space indent.
+ *
+ * These lines carry a verdict AND a remedy, which is the point of them, so
+ * they do not fit an 80-column terminal on one line - and a terminal-wrapped
+ * line breaks mid-word and mid-URL, which is how a required install step went
+ * unread. Shortening them instead would delete the remedy, so they fold.
+ */
+function fold(text: string, width = 76): string {
+  const out: string[] = []
+  let line = ""
+  for (const word of text.split(" ")) {
+    const indent = out.length === 0 ? "" : "  "
+    if (line === "") line = indent + word
+    else if (`${line} ${word}`.length <= width) line += ` ${word}`
+    else {
+      out.push(line)
+      line = `  ${word}`
+    }
+  }
+  if (line !== "") out.push(line)
+  return out.join("\n")
+}
+
+/**
  * One line for the startup summary, alongside adapter and model. Whether a
  * session is attached is not knowable here — the server starts per
  * conversation — so this reports what clco did, and whether a connect dialog
@@ -323,7 +347,7 @@ export function startupLine(
       // No number: the budget is clco's own and the bunx inside claude has none.
       slow: "registry.npmjs.org is slow to answer - browser tools may be slow to appear",
     }
-    return `! browser: ${line[registry]}`
+    return fold(`! browser: ${line[registry]}`)
   }
   // Name the exact spec: it is user-overridable, it is what runs, and after a
   // bad upstream release "which version did that session run?" has to be
@@ -339,7 +363,7 @@ export function startupLine(
       : null,
     token ? null : "connect dialog each session",
   ].filter(Boolean)
-  return `+ browser: ${pkg}${notes.length > 0 ? ` (${notes.join("; ")})` : ""}`
+  return fold(`+ browser: ${pkg}${notes.length > 0 ? ` (${notes.join("; ")})` : ""}`)
 }
 
 /**
@@ -347,32 +371,44 @@ export function startupLine(
  * the very command that is running.
  */
 export function setupNote(installed: boolean): string {
+  // Three separate things, and the old wording ran them together: it said
+  // "clco registers no browser server", which reads as though the extension
+  // WERE the server. It is not - clco registers the server, the extension is
+  // what lets that server drive the user's own tab, and the token only skips a
+  // click. Conflating them left people unsure what they had actually agreed to.
   if (installed) {
     return (
-      `${EXTENSION_NAME} detected - registering ${mcpPackage()} --extension.\n` +
-      `Tools arrive as mcp__playwright__*. Click the extension to share a tab.`
+      `${EXTENSION_NAME} found, so both halves are in place:\n` +
+      `  clco  registers ${mcpPackage()} --extension each session\n` +
+      `  you   click the extension to share a tab\n` +
+      `Tools then arrive as mcp__playwright__*.\n` +
+      `\n` +
+      `The token prompt after this is optional - press Enter to skip it.`
     )
   }
-  // Lead with the fact that this needs a manual step. The previous wording
-  // buried it in a subordinate clause and wrapped the URL, so it read as an
-  // aside - people answered Yes and then wondered why no browser tools ever
-  // showed up.
   return (
-    `Needs a Chrome extension that clco cannot install for you.\n` +
-    `Without it there is no browser control at all - no tools appear.\n` +
+    `Browser control is two halves, and clco only owns one:\n` +
+    `  clco  registers ${mcpPackage()}, which it fetches from npm\n` +
+    `  you   install one Chrome extension, which clco cannot do\n` +
     `\n` +
-    `Open this and click "Add to Chrome":\n` +
+    `The extension is what lets that server drive YOUR tab, with your\n` +
+    `logins, instead of a fresh throwaway profile. Without it clco\n` +
+    `registers no server at all, since a server with no tab to attach to\n` +
+    `would only fail on every call - so no browser tools appear.\n` +
+    `\n` +
+    `Install "${EXTENSION_NAME}", then restart clco:\n` +
     `${EXTENSION_URL}\n` +
     `\n` +
-    `Answering Yes now is fine - install it whenever, then restart clco.`
+    `Answering Yes now is fine - install it whenever you like.`
   )
 }
 
 export function extensionHint(installed: boolean, token?: string): string {
   if (!installed) {
     return (
-      `Browser control is ON but has no extension, so no tools appear.\n` +
-      `${EXTENSION_NAME} is the missing half, and only you can install it:\n` +
+      `Browser control is ON, but the Chrome extension it needs is not\n` +
+      `installed, so clco registers no server and no tools appear.\n` +
+      `Only you can install it - clco cannot:\n` +
       `${EXTENSION_URL}`
     )
   }
@@ -381,12 +417,12 @@ export function extensionHint(installed: boolean, token?: string): string {
   // stored token is the closest thing to a prediction, since it is exactly
   // what removes the manual connect step.
   return (
-    `${EXTENSION_NAME} detected - registering ${mcpPackage()} --extension.\n` +
-    `Tools arrive as mcp__playwright__*.\n` +
+    `${EXTENSION_NAME} found. Registering ${mcpPackage()} --extension\n` +
+    `each session. Tools arrive as mcp__playwright__*.\n` +
     (token
-      ? `Extension token stored, so sessions attach without the connect dialog.`
-      : `No extension token: each session shows the connect dialog. The\n` +
-        `extension offers a ${TOKEN_ENV} value - store it with:` +
-        `\n  pbpaste | clco token`)
+      ? `Token stored, so sessions attach without the connect dialog.`
+      : `No token stored - optional, and only affects the click: each\n` +
+        `session shows the connect dialog instead. The extension offers a\n` +
+        `${TOKEN_ENV} value; store it with:\n  pbpaste | clco token`)
   )
 }

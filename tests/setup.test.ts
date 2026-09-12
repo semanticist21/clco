@@ -10,6 +10,7 @@ import {
   extensionInstalled,
   parseToken,
   probesDefaultRegistry,
+  setupNote,
   startupLine,
 } from "../src/browsermcp"
 import {
@@ -18,6 +19,7 @@ import {
   setupEnv,
   shouldSelectModel,
 } from "../src/setup"
+import { tlsHint } from "../src/tls"
 
 const saved = (over: Partial<Record<string, boolean>> = {}) => ({
   version: 2,
@@ -140,7 +142,7 @@ describe("browser control", () => {
     // detection has to be filesystem-based to avoid a false negative.
     expect(await extensionInstalled("/nonexistent-home")).toBe(false)
     expect(extensionHint(false)).toContain("chromewebstore.google.com")
-    expect(extensionHint(true)).toContain("detected")
+    expect(extensionHint(true)).toContain("found")
   })
 })
 
@@ -451,7 +453,10 @@ describe("a package clco cannot probe", () => {
     const line = startupLine(
       true, true, "tok", true, undefined, undefined, "@corp/mcp@1.2.3",
     )!
-    expect(line).toBe(
+    // Folded, because the verdict and the reason together do not fit 80
+    // columns and a terminal-wrapped line breaks mid-word.
+    expect(line.split("\n").every((l) => l.length <= 76)).toBe(true)
+    expect(line.replace(/\n\s+/g, " ")).toBe(
       "+ browser: @corp/mcp@1.2.3 (not the default package, so the registry check was skipped)",
     )
   })
@@ -459,9 +464,11 @@ describe("a package clco cannot probe", () => {
   // Two same-shaped parentheticals in a row read as unrelated afterthoughts on
   // the line that is meant to be clco's clearest summary.
   test("merges into one parenthetical when the token is missing too", () => {
-    expect(
-      startupLine(true, true, undefined, true, undefined, undefined, "@corp/mcp@1.2.3"),
-    ).toBe(
+    const both = startupLine(
+      true, true, undefined, true, undefined, undefined, "@corp/mcp@1.2.3",
+    )!
+    expect(both.split("\n").every((l) => l.length <= 76)).toBe(true)
+    expect(both.replace(/\n\s+/g, " ")).toBe(
       "+ browser: @corp/mcp@1.2.3 (not the default package, so the registry" +
         " check was skipped; connect dialog each session)",
     )
@@ -529,5 +536,50 @@ describe("CA bundle handed to the MCP child", () => {
     expect(envOf(browserMcpConfig(true, "~/ca.pem"))!.NODE_EXTRA_CA_CERTS).toBe(
       `${homedir()}/ca.pem`,
     )
+  })
+})
+
+// A terminal wraps a long line mid-word and mid-URL. That is how the browser
+// extension step went unread: its URL broke across two lines, so it could be
+// neither clicked nor copied, and copying it landed on the Web Store home
+// page. Every status line and note clco can print is measured here so the
+// class cannot come back one string at a time.
+describe("nothing clco prints overflows an 80-column terminal", () => {
+  // 76, not 80: a clack note box adds two columns of frame on each side.
+  const LIMIT = 76
+  const lines = (text: string | null) => (text ?? "").split("\n")
+
+  const everything: Array<[string, string | null]> = [
+    ["no extension", startupLine(true, false)],
+    ["no runner", startupLine(true, true, "t", false)],
+    ["stood aside", startupLine(true, true, "t", true, undefined, false)],
+    ["tls, no bundle", startupLine(true, true, "t", true, "tls", undefined, undefined, false)],
+    ["tls, bundle", startupLine(true, true, "t", true, "tls", undefined, undefined, true)],
+    ["expired", startupLine(true, true, "t", true, "expired")],
+    ["blocked", startupLine(true, true, "t", true, "blocked")],
+    ["slow", startupLine(true, true, "t", true, "slow")],
+    ["ok", startupLine(true, true, "t", true, "ok")],
+    ["ok, no token", startupLine(true, true, undefined, true, "ok")],
+    ["other package", startupLine(true, true, undefined, true, undefined, undefined, "@corp/mcp@9.9.9")],
+    ["setup note, missing", setupNote(false)],
+    ["setup note, present", setupNote(true)],
+    ["hint, missing", extensionHint(false)],
+    ["hint, no token", extensionHint(true)],
+    ["hint, token", extensionHint(true, "tok")],
+    ["tls hint, no bundle", tlsHint(false)],
+    ["tls hint, bundle", tlsHint(true)],
+  ]
+
+  test.each(everything)("%s fits", (_name, text) => {
+    for (const line of lines(text)) expect(line.length).toBeLessThanOrEqual(LIMIT)
+  })
+
+  // The URL is the one string where wrapping is not merely ugly: a broken URL
+  // is a dead link. It must start its own line everywhere it appears.
+  test.each(everything)("%s keeps any URL whole", (_name, text) => {
+    for (const line of lines(text)) {
+      if (!line.includes("chromewebstore")) continue
+      expect(line.trim()).toBe(EXTENSION_URL)
+    }
   })
 })
