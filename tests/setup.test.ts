@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test"
 import { readFile, rm } from "node:fs/promises"
-import { tmpdir } from "node:os"
+import { homedir, tmpdir } from "node:os"
 import { join } from "node:path"
 import {
   MCP_PACKAGE,
@@ -8,6 +8,7 @@ import {
   extensionHint,
   extensionInstalled,
   parseToken,
+  probesDefaultRegistry,
   startupLine,
 } from "../src/browsermcp"
 import {
@@ -246,8 +247,10 @@ describe("browser MCP under a TLS-inspecting proxy", () => {
     expect(server.env).toEqual({ NODE_EXTRA_CA_CERTS: "/tmp/ca.pem" })
   })
 
+  // null, not undefined - undefined selects the process.env default, so this
+  // asserted the developer's own environment rather than the intended input.
   test("sets no env when neither a CA nor a token is configured", () => {
-    expect(JSON.parse(browserMcpConfig(true, undefined)!).mcpServers.playwright.env)
+    expect(JSON.parse(browserMcpConfig(true, null)!).mcpServers.playwright.env)
       .toBeUndefined()
   })
 
@@ -339,7 +342,7 @@ describe("registry reachability", () => {
     )
     // A re-signed certificate is a different problem with a different fix, and
     // reporting it as "unreachable" sends the user looking at their firewall.
-    const tls = startupLine(true, true, "tok", true, "tls")!
+    const tls = startupLine(true, true, "tok", true, "tls", undefined, undefined, false)!
     expect(tls).toContain("TLS rejected")
     expect(tls).toContain("Set CLCO_CA_BUNDLE")
     expect(startupLine(true, true, "tok", true, "ok")).toBe(
@@ -348,8 +351,8 @@ describe("registry reachability", () => {
     // A slow proxy is not a verdict: the bunx inside claude has no 2.5s
     // budget, so predicting that tools "will not appear" would be wrong.
     const slow = startupLine(true, true, "tok", true, "slow")!
-    expect(slow).toContain("did not answer in 2.5s")
-    expect(slow).toContain("may")
+    expect(slow).toContain("is slow to answer")
+    expect(slow).toContain("may be slow")
     // Not checked is not the same as unreachable.
     expect(startupLine(true, true, "tok", true, undefined)).toBe(
       "+ browser: @playwright/mcp@latest",
@@ -418,17 +421,35 @@ describe("model when the prompt is off", () => {
 // Telling someone to set a variable they already set is the advice this line
 // exists to avoid giving.
 describe("TLS advice adapts to what is already configured", () => {
+  // Keyed on whether a bundle LOADED, not on whether the variable is set: an
+  // unreadable path leaves it set and loads nothing, and claiming the bundle
+  // does not cover the chain would then point away from the real fix.
   test("names the configured bundle as insufficient instead", () => {
-    const before = process.env.CLCO_CA_BUNDLE
-    process.env.CLCO_CA_BUNDLE = "/tmp/ca.pem"
-    try {
-      const line = startupLine(true, true, "tok", true, "tls")!
-      expect(line).toContain("does not cover this chain")
-      expect(line).not.toContain("Set CLCO_CA_BUNDLE")
-    } finally {
-      if (before === undefined) delete process.env.CLCO_CA_BUNDLE
-      else process.env.CLCO_CA_BUNDLE = before
-    }
+    const line = startupLine(true, true, "tok", true, "tls", undefined, undefined, true)!
+    expect(line).toContain("does not cover this chain")
+    expect(line).not.toContain("Set CLCO_CA_BUNDLE")
+  })
+})
+
+// The probe only knows registry.npmjs.org. A spec pointing elsewhere is not
+// probed, and a bare "+" there would assert a check that never ran.
+describe("a registry clco cannot probe", () => {
+  test("says the check did not run", () => {
+    const line = startupLine(
+      true, true, "tok", true, undefined, undefined, "@corp/mcp@1.2.3",
+    )!
+    expect(line).toBe("+ browser: @corp/mcp@1.2.3 (registry not checked)")
+  })
+
+  // A pin or a rollback still comes from npmjs, so the check is as truthful as
+  // it is by default and must not be skipped.
+  test("a pinned version is still probed", () => {
+    expect(probesDefaultRegistry("@playwright/mcp@0.0.80")).toBe(true)
+    expect(probesDefaultRegistry("@playwright/mcp@latest")).toBe(true)
+    expect(probesDefaultRegistry("@corp/playwright-mcp@1.2.3")).toBe(false)
+    expect(
+      startupLine(true, true, "tok", true, "ok", undefined, "@playwright/mcp@0.0.80"),
+    ).toBe("+ browser: @playwright/mcp@0.0.80")
   })
 })
 
@@ -437,19 +458,35 @@ describe("TLS advice adapts to what is already configured", () => {
 // own probe pass while the child still could not fetch.
 describe("CA bundle handed to the MCP child", () => {
   const envOf = (config: string | null) =>
-    JSON.parse(config!).mcpServers.playwright.env
+    JSON.parse(config!).mcpServers.playwright.env as
+      | Record<string, string>
+      | undefined
 
   test("forwards a single absolute path", () => {
-    expect(envOf(browserMcpConfig(true, "/a/ca.pem:/b/ca.pem")).NODE_EXTRA_CA_CERTS)
+    expect(envOf(browserMcpConfig(true, "/a/ca.pem:/b/ca.pem"))!.NODE_EXTRA_CA_CERTS)
       .toBe("/a/ca.pem")
     // Relative resolves against the child's cwd, not clco's.
     expect(
-      envOf(browserMcpConfig(true, "ca.pem")).NODE_EXTRA_CA_CERTS,
+      envOf(browserMcpConfig(true, "ca.pem"))!.NODE_EXTRA_CA_CERTS,
     ).toStartWith("/")
   })
 
+  // null, not undefined: undefined selects the process.env default, so this
+  // test used to fail for anyone who actually had CLCO_CA_BUNDLE exported -
+  // exactly the users the feature exists for.
   test("no CA means no env block at all", () => {
-    expect(JSON.parse(browserMcpConfig(true, undefined)!).mcpServers.playwright.env)
+    expect(JSON.parse(browserMcpConfig(true, null)!).mcpServers.playwright.env)
       .toBeUndefined()
+  })
+
+  // caPaths() is shared with clco's own bundle loading, so a padded or ~-based
+  // value cannot mean one thing in-process and another in the child.
+  test("trims and expands the way clco's own loader does", () => {
+    expect(envOf(browserMcpConfig(true, " /a/ca.pem "))!.NODE_EXTRA_CA_CERTS).toBe(
+      "/a/ca.pem",
+    )
+    expect(envOf(browserMcpConfig(true, "~/ca.pem"))!.NODE_EXTRA_CA_CERTS).toBe(
+      `${homedir()}/ca.pem`,
+    )
   })
 })

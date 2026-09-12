@@ -108,11 +108,14 @@ pbpaste | clco token       # clco token --clear to remove it
 
 Started with `bunx` (or `npx`) and fetched from npm each session. If that fails,
 clco says which way it failed at startup rather than leaving you with tools that
-silently never appear:
+silently never appear — unless `CLCO_MCP_PACKAGE` points at another registry,
+which clco cannot probe and says so:
 
 ```
-! browser: cannot reach registry.npmjs.org - ...
+! browser: cannot reach registry.npmjs.org - browser tools will not appear
+! browser: registry.npmjs.org is slow to answer - browser tools may be slow to appear
 ! browser: TLS rejected by registry.npmjs.org - ... Set CLCO_CA_BUNDLE to your company CA.
++ browser: @corp/playwright-mcp@1.2.3 (registry not checked)
 ```
 
 That check only knows about `registry.npmjs.org`, so it cannot speak for an

@@ -14,9 +14,9 @@
 
 import { readdir } from "node:fs/promises"
 import { copilotFetch } from "./api"
-import { isTlsTrustError } from "./tls"
+import { caBundle, caPaths, isTlsTrustError } from "./tls"
 import { homedir, platform } from "node:os"
-import { join, resolve } from "node:path"
+import { join } from "node:path"
 
 export const EXTENSION_ID = "mmlmfjhmonkocbjadbfplnigmagldckm"
 export const EXTENSION_NAME = "Playwright MCP Bridge"
@@ -41,6 +41,20 @@ export const MCP_PACKAGE = "@playwright/mcp@latest"
 /** The spec clco will actually register, override included. */
 export function mcpPackage(): string {
   return process.env.CLCO_MCP_PACKAGE || MCP_PACKAGE
+}
+
+/**
+ * Whether the configured spec still comes from npmjs, i.e. whether probing
+ * registry.npmjs.org says anything about it.
+ *
+ * Compares the package NAME, not the whole spec. CLCO_MCP_PACKAGE has three
+ * documented uses and two of them - pinning a version and rolling back past a
+ * bad release - leave the registry exactly where it was, so keying this on the
+ * full spec switched the check off for a corporate user who had merely pinned.
+ */
+export function probesDefaultRegistry(pkg = mcpPackage()): boolean {
+  const name = (spec: string) => spec.slice(0, spec.lastIndexOf("@")) || spec
+  return name(pkg) === name(MCP_PACKAGE)
 }
 /** Set by the extension; with it the bridge attaches without a dialog. */
 export const TOKEN_ENV = "PLAYWRIGHT_MCP_EXTENSION_TOKEN"
@@ -118,7 +132,8 @@ export async function extensionInstalled(home = homedir()): Promise<boolean> {
  */
 export function browserMcpConfig(
   installed: boolean,
-  caBundlePath = process.env.CLCO_CA_BUNDLE,
+  /** Null means "no CA", which an ambient CLCO_CA_BUNDLE must not override. */
+  caBundleValue: string | null = process.env.CLCO_CA_BUNDLE ?? null,
   /** Read here rather than at module load so a test can set it. */
   pkg = mcpPackage(),
 ): string | null {
@@ -129,14 +144,13 @@ export function browserMcpConfig(
   // otherwise browser control is the one feature that still breaks on the
   // network clco was hardened for.
   //
-  // Only the first path, made absolute. CLCO_CA_BUNDLE takes several paths
-  // separated by ":" and clco unions them in-process, but NODE_EXTRA_CA_CERTS
-  // names a single file - so forwarding the raw value made clco's own probe
-  // pass while the child still could not fetch, which is the silent failure
-  // the startup line exists to prevent. Absolute because this resolves against
-  // the child's cwd, not clco's.
-  const first = caBundlePath?.split(":").find(Boolean)
-  if (first) env.NODE_EXTRA_CA_CERTS = resolve(first)
+  // Only the first path. CLCO_CA_BUNDLE takes several separated by ":" and
+  // clco unions them in-process, but NODE_EXTRA_CA_CERTS names a single file -
+  // so forwarding the raw value made clco's own probe pass while the child
+  // still could not fetch. caPaths() is the shared parser, so the absolute
+  // path the child gets is the one clco read for itself.
+  const first = caBundleValue === null ? undefined : caPaths(caBundleValue)[0]
+  if (first) env.NODE_EXTRA_CA_CERTS = first
   // The extension token deliberately does NOT go here. This object becomes an
   // --mcp-config argv element, and argv is readable by other local users, so
   // naming the token here published it. It reaches the server through claude's
@@ -240,6 +254,8 @@ export function startupLine(
   /** False when clco stood aside for a user-supplied --mcp-config. */
   registered?: boolean,
   pkg = mcpPackage(),
+  /** Whether a CA bundle actually LOADED - not merely whether the var is set. */
+  caLoaded = caBundle() !== undefined,
 ): string | null {
   if (!enabled) return null
   if (!installed) {
@@ -256,8 +272,12 @@ export function startupLine(
       "! browser: TLS rejected by registry.npmjs.org - browser tools will not" +
       " appear." +
       // Telling someone to set a variable they already set is the advice this
-      // line exists to avoid giving.
-      (process.env.CLCO_CA_BUNDLE
+      // line exists to avoid giving. Keyed on whether a bundle LOADED, not on
+      // whether the variable is set: an unreadable path leaves it set and
+      // loads nothing, and "does not cover this chain" would then be a
+      // confident misdiagnosis pointing away from the real fix. caBundle()
+      // logs the read failure itself.
+      (caLoaded
         ? " Your CLCO_CA_BUNDLE does not cover this chain."
         : " Set CLCO_CA_BUNDLE to your company CA.")
     )
@@ -268,15 +288,28 @@ export function startupLine(
     )
   }
   if (registry === "slow") {
+    // No number: the budget is clco's own and the bunx inside claude has none,
+    // so quoting it invites the reader to treat it as the threshold that
+    // matters.
     return (
-      "! browser: registry.npmjs.org did not answer in 2.5s - browser tools may" +
-      " be slow to appear"
+      "! browser: registry.npmjs.org is slow to answer - browser tools may be" +
+      " slow to appear"
     )
   }
   // Name the exact spec: it is user-overridable, it is what runs, and after a
   // bad upstream release "which version did that session run?" has to be
   // answerable from something.
-  return `+ browser: ${pkg}${token ? "" : " (connect dialog each session)"}`
+  //
+  // And say when nothing was checked. The probe only knows registry.npmjs.org,
+  // so a spec pointing somewhere else is not probed at all - and a bare "+"
+  // there would assert a check that never ran, which is the same silent
+  // success the probe exists to prevent.
+  const unchecked = registry === undefined && !probesDefaultRegistry(pkg)
+  return (
+    `+ browser: ${pkg}` +
+    (unchecked ? " (registry not checked)" : "") +
+    (token ? "" : " (connect dialog each session)")
+  )
 }
 
 /**

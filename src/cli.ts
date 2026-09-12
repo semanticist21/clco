@@ -26,11 +26,10 @@ import { setAdapterLogSink, startServer } from "./server"
 import { buildModelPickerFrom, resolveClaude, runClaude } from "./spawn"
 import { TLS_HINT, isTlsTrustError } from "./tls"
 import {
-  MCP_PACKAGE,
   extensionHint,
   extensionInstalled,
-  mcpPackage,
   parseToken,
+  probesDefaultRegistry,
   registryStatus,
   startupLine,
 } from "./browsermcp"
@@ -656,8 +655,14 @@ async function main(): Promise<void> {
     }
   }
   console.error(`+ adapter: ${server.url}`)
+  // serve never spawns claude, so naming a session model there would advertise
+  // a routing decision no process makes. The slot list is still useful to
+  // someone pointing their own claude at the adapter.
+  const slots = `sonnet=${models.sonnet} opus=${models.opus} haiku=${models.haiku}`
   console.error(
-    `+ model: ${defaultModel ?? "(claude default)"} (sonnet=${models.sonnet} opus=${models.opus} haiku=${models.haiku})`,
+    args.command === "serve"
+      ? `+ slots: ${slots}`
+      : `+ model: ${defaultModel ?? "(claude default)"} (${slots})`,
   )
   const browserEnabled =
     setup?.browser === true && args.overrides.browser !== false
@@ -680,7 +685,7 @@ async function main(): Promise<void> {
     // Only worth asking when everything else is in place - and only about the
     // default spec, since the probe hits registry.npmjs.org and can say
     // nothing true about an internal mirror named by CLCO_MCP_PACKAGE.
-    browserExtension && registered && mcpPackage() === MCP_PACKAGE
+    browserExtension && registered && probesDefaultRegistry()
       ? await registryStatus()
       : undefined,
     browserEnabled && browserExtension ? registered : undefined,

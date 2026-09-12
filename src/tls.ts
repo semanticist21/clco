@@ -13,7 +13,33 @@
 // bundled and system roots.
 
 import { readFileSync } from "node:fs"
+import { homedir } from "node:os"
+import { join, resolve } from "node:path"
 import { getCACertificates } from "node:tls"
+
+/**
+ * The paths CLCO_CA_BUNDLE names, absolute.
+ *
+ * The single parser, because there used to be two: this one trimmed the raw
+ * value before splitting and the one handing a path to the MCP child did not,
+ * so " /a/ca.pem " worked in-process and reached the child as a cwd-joined
+ * nonsense path - clco's own probe passing while the child could not fetch,
+ * which is the asymmetry that whole code path exists to remove. Absolute
+ * because the child resolves relative paths against its own cwd, and `~` is
+ * expanded because the README documents that spelling and only an unquoted
+ * shell was expanding it.
+ */
+export function caPaths(raw = process.env.CLCO_CA_BUNDLE): string[] {
+  return (raw ?? "")
+    .split(":")
+    .map((path) => path.trim())
+    .filter(Boolean)
+    .map((path) =>
+      path === "~" || path.startsWith("~/")
+        ? join(homedir(), path.slice(1))
+        : resolve(path),
+    )
+}
 
 let resolved: string[] | null | undefined
 
@@ -24,13 +50,13 @@ let resolved: string[] | null | undefined
  */
 export function caBundle(): string[] | undefined {
   if (resolved !== undefined) return resolved ?? undefined
-  const raw = process.env.CLCO_CA_BUNDLE?.trim()
-  if (!raw) {
+  const paths = caPaths()
+  if (paths.length === 0) {
     resolved = null
     return undefined
   }
   const extra: string[] = []
-  for (const path of raw.split(":").filter(Boolean)) {
+  for (const path of paths) {
     try {
       extra.push(readFileSync(path, "utf8"))
     } catch (err) {
@@ -77,7 +103,10 @@ const TRUST_CODES = new Set([
   "UNABLE_TO_GET_ISSUER_CERT",
   "UNABLE_TO_GET_ISSUER_CERT_LOCALLY",
   "CERT_UNTRUSTED",
-  "ERR_TLS_CERT_ALTNAME_INVALID",
+  // Deliberately NOT ERR_TLS_CERT_ALTNAME_INVALID: that chain verified and
+  // only the name did not match, so no CA bundle can fix it. Including it made
+  // clco tell a user whose bundle worked perfectly that their bundle did not
+  // cover the chain, and print the whole CA hint besides.
 ])
 
 /**
@@ -86,17 +115,41 @@ const TRUST_CODES = new Set([
  * Accepts the thrown error (preferred - it carries `code`) or just a message,
  * since some call sites only have the string.
  */
-export function isTlsTrustError(err: unknown): boolean {
+export function isTlsTrustError(err: unknown, depth = 0): boolean {
   if (typeof err === "object" && err !== null) {
     const code = (err as { code?: unknown }).code
     if (typeof code === "string" && TRUST_CODES.has(code)) return true
-    const cause = (err as { cause?: unknown }).cause
-    if (cause !== undefined && cause !== err && isTlsTrustError(cause)) return true
+    // Bounded: a cyclic `cause` chain used to overflow the stack, and since
+    // every caller is an error handler the RangeError escaped the catch that
+    // was about to render a 502 or print the user's real error.
+    if (depth < 4) {
+      const cause = (err as { cause?: unknown }).cause
+      if (cause !== undefined && cause !== err && isTlsTrustError(cause, depth + 1)) {
+        return true
+      }
+      // undici reports a multi-address failure as an AggregateError, so the
+      // real trust error is in `errors`, not in `cause`.
+      const nested = (err as { errors?: unknown }).errors
+      if (Array.isArray(nested)) {
+        for (const one of nested) {
+          if (one !== err && isTlsTrustError(one, depth + 1)) return true
+        }
+      }
+    }
   }
   const message = typeof err === "string" ? err : String((err as Error)?.message ?? err)
   // Fallback for a stringified error, or a Bun/Node build that omits the code.
-  return /self[- ]signed certificate|unable to (get|verify) (local issuer|the first certificate)|unable to get issuer certificate|CERT_|certificate chain/i.test(
-    message,
+  // Anchored to the codes and the exact OpenSSL phrasings: a bare /CERT_/ or
+  // /certificate chain/ matched ordinary prose, so an upstream error body
+  // echoed into the adapter's 502 ("rotating certificate chain nightly") drew
+  // the whole CA hint onto a failure that had nothing to do with trust.
+  return (
+    /self[- ]signed certificate( in certificate chain)?|unable to (get local issuer certificate|get issuer certificate|verify the first certificate)/i.test(
+      message,
+    ) ||
+    /\b(DEPTH_ZERO_SELF_SIGNED_CERT|SELF_SIGNED_CERT_IN_CHAIN|UNABLE_TO_VERIFY_LEAF_SIGNATURE|UNABLE_TO_GET_ISSUER_CERT(_LOCALLY)?|CERT_UNTRUSTED)\b/.test(
+      message,
+    )
   )
 }
 

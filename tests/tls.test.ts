@@ -59,9 +59,75 @@ describe("registryStatus", () => {
     expect(await registryStatus(2500, "https://127.0.0.1:1/probe")).toBe("blocked")
   })
 
+  // A socket that accepts and never answers, so the verdict comes from the
+  // budget rather than from the network. An earlier version dialled a
+  // non-routable address and depended on it black-holing; behind a proxy that
+  // rejects immediately the same call returns "blocked" and the test flipped.
   test("a timeout is its own answer", async () => {
-    // 10.255.255.1 is non-routable, so the connection hangs rather than being
-    // refused - which is what a slow proxy looks like.
-    expect(await registryStatus(50, "https://10.255.255.1/probe")).toBe("slow")
+    const server = Bun.listen({
+      hostname: "127.0.0.1",
+      port: 0,
+      socket: { data() {}, open() {} },
+    })
+    try {
+      expect(
+        await registryStatus(50, `http://127.0.0.1:${server.port}/probe`),
+      ).toBe("slow")
+    } finally {
+      server.stop(true)
+    }
+  })
+})
+
+// A hostname mismatch verifies the chain and fails on the name, so no CA can
+// fix it - and saying otherwise sent the user to export a certificate that
+// could not help.
+describe("what is not a trust failure", () => {
+  test("a hostname mismatch is not", () => {
+    const err = Object.assign(
+      new Error('ERR_TLS_CERT_ALTNAME_INVALID fetching "https://127.0.0.1:9556/"'),
+      { code: "ERR_TLS_CERT_ALTNAME_INVALID" },
+    )
+    expect(isTlsTrustError(err)).toBe(false)
+  })
+
+  // The adapter interpolates upstream error bodies into the 502 it classifies,
+  // so a bare /CERT_/ or /certificate chain/ drew the whole CA hint onto
+  // failures that had nothing to do with trust.
+  test.each([
+    "rotating certificate chain nightly, retry later",
+    "model CERT_test not supported",
+    "upstream said: ERR_CERT_AUTHORITY_INVALID page",
+  ])("prose is not: %s", (message) => {
+    expect(isTlsTrustError(message)).toBe(false)
+  })
+})
+
+// Every caller is a catch block, so a throw from here escapes the handler that
+// was about to render a 502 or print the user's real error.
+describe("isTlsTrustError cannot throw", () => {
+  test("survives a cyclic cause chain", () => {
+    const a = new Error("a") as Error & { cause?: unknown }
+    const b = new Error("b") as Error & { cause?: unknown }
+    a.cause = b
+    b.cause = a
+    expect(isTlsTrustError(a)).toBe(false)
+  })
+
+  test("survives a very deep cause chain", () => {
+    let err = new Error("leaf") as Error & { cause?: unknown }
+    for (let i = 0; i < 100_000; i++) {
+      err = Object.assign(new Error(`w${i}`), { cause: err })
+    }
+    expect(isTlsTrustError(err)).toBe(false)
+  })
+
+  // undici reports a multi-address failure this way, so the real trust error
+  // is in `errors` rather than in `cause`.
+  test("looks inside an AggregateError", () => {
+    const inner = Object.assign(new Error("self signed certificate"), {
+      code: "DEPTH_ZERO_SELF_SIGNED_CERT",
+    })
+    expect(isTlsTrustError(new AggregateError([inner], "fetch failed"))).toBe(true)
   })
 })
