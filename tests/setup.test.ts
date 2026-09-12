@@ -80,7 +80,9 @@ describe("browser control", () => {
     const i = args.indexOf("--mcp-config")
     expect(i).toBeGreaterThan(-1)
     const server = JSON.parse(args[i + 1]!).mcpServers.playwright
-    expect(server.args).toContain(MCP_PACKAGE)
+    // The literal, not the constant - comparing MCP_PACKAGE to itself passes
+    // for a typo or an unintended pin just as happily.
+    expect(server.args).toContain("@playwright/mcp@latest")
     // Without this the server drives its own browser instead of attaching to
     // the tab the user shared.
     expect(server.args).toContain("--extension")

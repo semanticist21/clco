@@ -251,6 +251,7 @@ export function extensionHint(installed: boolean, token?: string): string {
     (token
       ? `Extension token stored, so sessions attach without the connect dialog.`
       : `No extension token: each session shows the connect dialog. The\n` +
-        `extension offers a ${TOKEN_ENV} value - \`clco setup\` can store it.`)
+        `extension offers a ${TOKEN_ENV} value - store it with:` +
+        `\n  pbpaste | clco token`)
   )
 }

@@ -180,3 +180,63 @@ describe("prepareClaudeHome", () => {
     await rm(home, { recursive: true, force: true })
   })
 })
+
+describe("comma handling", () => {
+  // A regex over the whole document ate commas inside string values; a
+  // permission rule is the realistic carrier, and altering one changes what
+  // claude is allowed to do.
+  test("keeps commas inside strings, drops only trailing ones", async () => {
+    const home = join(tmpdir(), `clco-comma-${Date.now()}`)
+    const real = join(home, ".claude")
+    await mkdir(real, { recursive: true })
+    await writeFile(
+      join(real, "settings.json"),
+      '{\n  // c\n  "model": "x",\n  "permissions": { "allow": ["Bash(awk \'{print $1,}\')"] },\n}',
+    )
+    const dir = (await run(home))!
+    const parsed = JSON.parse(await readFile(join(dir, "settings.json"), "utf8"))
+    expect(parsed.permissions.allow[0]).toBe("Bash(awk '{print $1,}')")
+    expect(parsed.model).toBeUndefined()
+    await rm(home, { recursive: true, force: true })
+  })
+})
+
+describe("project trust", () => {
+  // clco sessions record trust in the private config dir, so a project only
+  // ever opened through clco never appears in the real file. Treating absent
+  // as "withdrawn" re-asked the trust question on every single launch.
+  test("absent from the real file means no opinion, not withdrawn", async () => {
+    const home = join(tmpdir(), `clco-trust-${Date.now()}`)
+    await mkdir(join(home, ".claude"), { recursive: true })
+    await writeFile(
+      join(home, ".claude.json"),
+      JSON.stringify({ projects: { "/other": { hasTrustDialogAccepted: true } } }),
+    )
+    const dir = (await run(home))!
+    const priv = JSON.parse(await readFile(join(dir, ".claude.json"), "utf8"))
+    priv.projects["/clco-only"] = { hasTrustDialogAccepted: true }
+    await writeFile(join(dir, ".claude.json"), JSON.stringify(priv))
+    await run(home)
+    const after = JSON.parse(await readFile(join(dir, ".claude.json"), "utf8"))
+    expect(after.projects["/clco-only"].hasTrustDialogAccepted).toBe(true)
+  })
+
+  // ...while a project the real file does know about still follows it.
+  test("an explicit false in the real file does propagate", async () => {
+    const home = join(tmpdir(), `clco-untrust-${Date.now()}`)
+    await mkdir(join(home, ".claude"), { recursive: true })
+    await writeFile(
+      join(home, ".claude.json"),
+      JSON.stringify({ projects: { "/p": { hasTrustDialogAccepted: true } } }),
+    )
+    const dir = (await run(home))!
+    await writeFile(
+      join(home, ".claude.json"),
+      JSON.stringify({ projects: { "/p": { hasTrustDialogAccepted: false } } }),
+    )
+    await run(home)
+    const after = JSON.parse(await readFile(join(dir, ".claude.json"), "utf8"))
+    expect(after.projects["/p"].hasTrustDialogAccepted).toBe(false)
+    await rm(home, { recursive: true, force: true })
+  })
+})

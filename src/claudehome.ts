@@ -73,9 +73,12 @@ async function writeSettings(real: string, home: string): Promise<void> {
       // Neither form parses: keep the previous private file rather than
       // replace it with something broken, and say so - a stale `model` here
       // is exactly what this function exists to prevent.
+      const first = existing === null
       console.error(
-        `[clco] could not parse ${join(real, "settings.json")} (${(err as Error).message});` +
-          " clco's copy was left as it was.",
+        `[clco] could not parse ${join(real, "settings.json")} (${(err as Error).message}) - ` +
+          (first
+            ? "this session starts with NO settings: no env, no hooks, no permissions."
+            : "clco's copy was left as it was."),
       )
     }
   }
@@ -86,6 +89,8 @@ function stripJsonComments(input: string): string {
   let out = ""
   let inString = false
   let escaped = false
+  // Positions in `out` of commas that sit outside any string.
+  const commaIndices = new Set<number>()
   for (let i = 0; i < input.length; i++) {
     const c = input[i]!
     if (inString) {
@@ -100,6 +105,7 @@ function stripJsonComments(input: string): string {
       out += c
       continue
     }
+    if (c === ",") commaIndices.add(out.length)
     if (c === "/" && input[i + 1] === "/") {
       while (i < input.length && input[i] !== "\n") i++
       out += "\n"
@@ -113,8 +119,21 @@ function stripJsonComments(input: string): string {
     }
     out += c
   }
-  // Trailing commas are legal in JSONC and fatal to JSON.parse.
-  return out.replace(/,(\s*[}\]])/g, "$1")
+  // Trailing commas are legal in JSONC and fatal to JSON.parse — but removing
+  // them with a regex over the whole document ate commas inside string values
+  // (a permission rule like "Bash(awk '{print $1,}')" lost one). Only drop a
+  // comma the scanner emitted outside a string.
+  let result = ""
+  for (let i = 0; i < out.length; i++) {
+    const c = out[i]!
+    if (c === "," && commaIndices.has(i)) {
+      let j = i + 1
+      while (j < out.length && /\s/.test(out[j]!)) j++
+      if (out[j] === "}" || out[j] === "]") continue
+    }
+    result += c
+  }
+  return result
 }
 
 // A second clco launch refreshes this file while the first session may be
@@ -155,10 +174,12 @@ async function syncClaudeState(userHome: string, home: string): Promise<void> {
     const realProjects = (real.projects ?? {}) as Record<string, { hasTrustDialogAccepted?: boolean }>
     const myProjects = (mine.projects ?? {}) as Record<string, { hasTrustDialogAccepted?: boolean }>
     for (const [path, entry] of Object.entries(myProjects)) {
-      // A deleted project entry is how trust is withdrawn, so treat "absent"
-      // as untrusted rather than leaving the stale grant in place.
-      entry.hasTrustDialogAccepted =
-        realProjects[path]?.hasTrustDialogAccepted ?? false
+      // Absent means "no opinion", not "withdrawn". clco sessions run against
+      // the private config dir, so a project only ever used through clco is
+      // never recorded in the real file at all — forcing false there re-asked
+      // the trust question on every single launch.
+      const trusted = realProjects[path]?.hasTrustDialogAccepted
+      if (trusted !== undefined) entry.hasTrustDialogAccepted = trusted
     }
     await atomicWrite(target, JSON.stringify(mine, null, 2) + "\n")
   } catch {
