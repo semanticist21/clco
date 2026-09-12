@@ -36,10 +36,13 @@ export const EXTENSION_URL =
 // offline path for browser control, and nothing here should imply otherwise.
 //
 // What @latest buys is that the server half stays in step with an extension
-// half that auto-updates from the Web Store and negotiates a protocol version
-// with it. How much skew that negotiation tolerates is not known - mismatch is
-// reported as VersionMismatchError (playwright-mcp #1090, #1452, #1571, #1579)
-// but no published number says how many releases behind still connects.
+// half that auto-updates from the Web Store and cannot be pinned alongside it.
+// How much version skew the pair tolerates is unknown, and deliberately not
+// asserted here: the shipped server carries no version-negotiation code for the
+// extension (0.0.80 is a thin shim over playwright-core 1.63.0-alpha, whose only
+// mismatch check is Playwright's own client/server one), and the connect-failure
+// reports - playwright-mcp #1090, #1452, #1571, #1579 - are not established to
+// be version skew. Treat the risk as real but unmeasured, not as a known break.
 //
 // Neither choice is a supply-chain control. The repo's bun.lock does not cover
 // this: the package is resolved by a bunx subprocess of claude, in its own
