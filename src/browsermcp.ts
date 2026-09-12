@@ -20,7 +20,11 @@ export const EXTENSION_ID = "mmlmfjhmonkocbjadbfplnigmagldckm"
 export const EXTENSION_NAME = "Playwright MCP Bridge"
 export const EXTENSION_URL =
   `https://chromewebstore.google.com/detail/playwright-extension/${EXTENSION_ID}`
-export const MCP_PACKAGE = "@playwright/mcp@latest"
+// Pinned rather than @latest: with -y, every session would fetch and execute
+// whatever was published most recently, inside a claude whose permission
+// prompts default to off and whose browser tools drive a logged-in profile.
+// One bad publish would reach every user the same day. Bump deliberately.
+export const MCP_PACKAGE = "@playwright/mcp@0.0.80"
 /** Set by the extension; with it the bridge attaches without a dialog. */
 export const TOKEN_ENV = "PLAYWRIGHT_MCP_EXTENSION_TOKEN"
 
@@ -86,8 +90,6 @@ export async function extensionInstalled(home = homedir()): Promise<boolean> {
 export function browserMcpConfig(
   installed: boolean,
   caBundlePath = process.env.CLCO_CA_BUNDLE,
-  /** Stored extension token, if any — see setup.ts. */
-  token?: string,
 ): string | null {
   if (!installed) return null
   const env: Record<string, string> = {}
@@ -96,10 +98,10 @@ export function browserMcpConfig(
   // otherwise browser control is the one feature that still breaks on the
   // network clco was hardened for.
   if (caBundlePath) env.NODE_EXTRA_CA_CERTS = caBundlePath
-  // Named here rather than left to inherit from claude: --extension selects
-  // the mode, the token is what removes its connect dialog, and both belong
-  // to this server rather than to whatever spawned it.
-  if (token) env[TOKEN_ENV] = token
+  // The extension token deliberately does NOT go here. This object becomes an
+  // --mcp-config argv element, and argv is readable by other local users, so
+  // naming the token here published it. It reaches the server through claude's
+  // environment instead (setupEnv), which MCP children inherit.
   return JSON.stringify({
     mcpServers: {
       playwright: {

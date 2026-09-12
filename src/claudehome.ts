@@ -83,6 +83,41 @@ async function atomicWrite(path: string, data: string): Promise<void> {
   }
 }
 
+/**
+ * `.claude.json` carries trust decisions, MCP server definitions (with their
+ * env secrets) and project history. Seeded once so the first session inherits
+ * it — but the security-relevant halves are re-synced every launch, because a
+ * copy frozen at first run means deleting a compromised MCP server, or
+ * withdrawing trust from a project, silently does not apply to clco sessions.
+ * Everything else stays clco's own.
+ */
+async function syncClaudeState(userHome: string, home: string): Promise<void> {
+  const target = join(home, ".claude.json")
+  const source = await readFile(join(userHome, ".claude.json"), "utf8").catch(
+    () => null,
+  )
+  if (source === null) return
+  const existing = await readFile(target, "utf8").catch(() => null)
+  if (existing === null) {
+    await copyFile(join(userHome, ".claude.json"), target).catch(() => {})
+    return
+  }
+  try {
+    const real = JSON.parse(source) as Record<string, unknown>
+    const mine = JSON.parse(existing) as Record<string, unknown>
+    mine.mcpServers = real.mcpServers
+    const realProjects = (real.projects ?? {}) as Record<string, { hasTrustDialogAccepted?: boolean }>
+    const myProjects = (mine.projects ?? {}) as Record<string, { hasTrustDialogAccepted?: boolean }>
+    for (const [path, entry] of Object.entries(myProjects)) {
+      const trusted = realProjects[path]?.hasTrustDialogAccepted
+      if (trusted !== undefined) entry.hasTrustDialogAccepted = trusted
+    }
+    await atomicWrite(target, JSON.stringify(mine, null, 2) + "\n")
+  } catch {
+    // Unparseable on either side: leave what is there rather than lose it.
+  }
+}
+
 export function claudeHome(home = homedir()): string {
   return join(home, ".config", "clco", "claude-home")
 }
@@ -159,13 +194,7 @@ export async function prepareClaudeHome(
 
   await writeSettings(real, home)
 
-  // Trust decisions, MCP servers and project history live here. Seeded once so
-  // the first clco session inherits them, then left alone: from that point it
-  // is clco's own state and must not be overwritten from the user's copy.
-  const stateFile = join(home, ".claude.json")
-  if (!(await lstat(stateFile).catch(() => null))) {
-    await copyFile(join(userHome, ".claude.json"), stateFile).catch(() => {})
-  }
+  await syncClaudeState(userHome, home)
 
   return home
 }

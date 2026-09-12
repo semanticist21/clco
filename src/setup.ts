@@ -158,11 +158,7 @@ export function setupClaudeArgs(
     overrides.browser !== false &&
     !has("--mcp-config")
   ) {
-    const config = browserMcpConfig(
-      browserExtension,
-      process.env.CLCO_CA_BUNDLE,
-      setup.browserToken,
-    )
+    const config = browserMcpConfig(browserExtension)
     if (config) out.push("--mcp-config", config)
   }
   return out

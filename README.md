@@ -1,6 +1,6 @@
 # clco
 
-Run Claude Code on your GitHub Copilot subscription. **clco never writes to your `~/.claude`** — it starts a local adapter that translates Anthropic Messages ↔ GitHub Copilot, and runs claude against a config directory of its own.
+Run Claude Code on your GitHub Copilot subscription. It starts a local adapter that translates Anthropic Messages ↔ GitHub Copilot, and runs claude against a config directory of its own — so **a `/model` pick inside clco never changes the model your plain `claude` uses**.
 
 ```
 $ clco
@@ -46,6 +46,13 @@ clco
 
 3. **Pick a model**, then claude starts. Switch mid-session with `/model`.
 
+   Answering yes to the first two together is worth understanding: claude runs
+   without permission prompts, and each session fetches and runs
+   `@playwright/mcp` (a pinned version, via `npx`) with access to the browser
+   tab you share. Either is reasonable alone; both at once is a lot of trust in
+   one command. `clco setup` changes them, `--no-bypass` / `--no-browser` skip
+   them for a single run.
+
 ## Usage
 
 ```sh
@@ -90,6 +97,26 @@ pbpaste | clco token       # clco token --clear to remove it
 ```
 
 Requires `npx` on PATH (Node.js) — clco says so at startup if it is missing.
+
+## What clco reads
+
+Nothing here leaves your machine — the only outbound requests are GitHub login,
+the Copilot token exchange, the model list, and your chat itself.
+
+- **Chrome, Chromium and Edge profile directories** — directory *names* only, to
+  see whether the Playwright extension is installed.
+- **The claude binary** — scanned once per claude version for the model ids it
+  knows, cached in `~/.config/clco/catalog.json`. Without it clco cannot tell
+  which ids `/model` will accept.
+- **`~/.claude`** — mirrored into `~/.config/clco/claude-home` as symlinks, so
+  your plugins, skills, agents and history stay shared. Only `settings.json`
+  and its siblings are private copies; that is what keeps a `/model` pick out of
+  your real config. Your session history, projects and shell snapshots are
+  written into `~/.claude` exactly as a plain `claude` run would.
+- **`~/.claude.json`** — copied into clco's config dir, since it holds trust
+  decisions and MCP servers. It carries account identifiers and any secrets your
+  MCP servers declare. `uninstall.sh --full` removes that copy; a plain
+  uninstall leaves it.
 
 ## Corporate networks
 

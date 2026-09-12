@@ -133,13 +133,27 @@ export async function loadPrefs(): Promise<Prefs> {
  * writes `setup` — and a plain write let whichever ran last erase the other.
  * Picking a model really did discard the setup answers.
  */
+async function writeSecret(path: string, data: string): Promise<void> {
+  const tmp = `${path}.tmp.${process.pid}`
+  await rm(tmp, { force: true }).catch(() => {})
+  const handle = await openExclusive(tmp)
+  try {
+    await handle.writeFile(data)
+  } finally {
+    await handle.close()
+  }
+  await chmod(tmp, 0o600).catch(() => {})
+  await rename(tmp, path)
+}
+
 export async function savePrefs(prefs: Prefs): Promise<void> {
   await migrateFromClcopilot()
   await mkdir(authDir(), { recursive: true })
   const merged = { ...(await loadPrefs()), ...prefs }
-  await writeFile(prefsPath(), JSON.stringify(merged, null, 2) + "\n", {
-    mode: 0o600,
-  })
+  // prefs now holds the Playwright extension token, so it gets the same
+  // treatment as auth.json: exclusive create, explicit mode, atomic rename.
+  // A plain write leaves an existing 0644 file at 0644 and can truncate.
+  await writeSecret(prefsPath(), JSON.stringify(merged, null, 2) + "\n")
 }
 
 export async function clearAuth(): Promise<void> {

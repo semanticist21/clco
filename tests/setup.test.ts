@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test"
-import { rm } from "node:fs/promises"
+import { readFile, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import {
@@ -227,23 +227,22 @@ describe("browser MCP under a TLS-inspecting proxy", () => {
       .toBeUndefined()
   })
 
-  // --extension selects the mode; the token is what removes its connect
-  // dialog. Naming it on the server rather than letting it inherit from
-  // claude keeps the two halves of one feature in one place.
-  test("names the extension token on the server, alongside --extension", () => {
-    const server = JSON.parse(browserMcpConfig(true, undefined, "tok")!)
-      .mcpServers.playwright
-    expect(server.args).toContain("--extension")
-    expect(server.env).toEqual({ PLAYWRIGHT_MCP_EXTENSION_TOKEN: "tok" })
-  })
-
-  test("carries both when a CA and a token are set", () => {
-    const env = JSON.parse(browserMcpConfig(true, "/tmp/ca.pem", "tok")!)
-      .mcpServers.playwright.env
-    expect(env).toEqual({
-      NODE_EXTRA_CA_CERTS: "/tmp/ca.pem",
-      PLAYWRIGHT_MCP_EXTENSION_TOKEN: "tok",
-    })
+  // This object becomes an --mcp-config argv element, and argv is readable by
+  // other local users. The token travels through claude's environment, which
+  // MCP children inherit, so it must never appear here.
+  test("keeps the extension token out of argv", () => {
+    const config = browserMcpConfig(true, "/tmp/ca.pem")!
+    expect(config).not.toContain("PLAYWRIGHT_MCP_EXTENSION_TOKEN")
+    const args = setupClaudeArgs(
+      { ...saved({ browser: true }), browserToken: "SECRET" },
+      {},
+      [],
+      true,
+    )
+    expect(args.join(" ")).not.toContain("SECRET")
+    // ...while still reaching the server by the route that is not public.
+    expect(setupEnv({ ...saved({ browser: true }), browserToken: "SECRET" }, {}))
+      .toEqual({ PLAYWRIGHT_MCP_EXTENSION_TOKEN: "SECRET" })
   })
 
   // The installer guarantees bun, not Node, while startupLine would otherwise
@@ -269,6 +268,30 @@ describe("prefs merging", () => {
       const after = await loadPrefs()
       expect(after.last_model).toBe("kimi-k3")
       expect(after.setup?.browser).toBe(true)
+    } finally {
+      setConfigDir(null)
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
+})
+
+describe("token clearing", () => {
+  // Merging made this the one path that has to delete rather than add, and
+  // it works only because the caller spreads the whole setup object.
+  test("--clear removes the key from the file on disk", async () => {
+    const { loadPrefs, savePrefs, setConfigDir } = await import("../src/config")
+    const dir = join(tmpdir(), `clco-clear-${Date.now()}`)
+    setConfigDir(dir)
+    try {
+      await savePrefs({
+        setup: { version: 2, bypass: true, select: true, browser: true, browserToken: "tok" },
+      })
+      expect((await loadPrefs()).setup?.browserToken).toBe("tok")
+      const prefs = await loadPrefs()
+      await savePrefs({ setup: { ...prefs.setup!, browserToken: undefined } })
+      const raw = await readFile(join(dir, "prefs.json"), "utf8")
+      expect(raw).not.toContain("browserToken")
+      expect((await loadPrefs()).setup?.bypass).toBe(true)
     } finally {
       setConfigDir(null)
       await rm(dir, { recursive: true, force: true })
