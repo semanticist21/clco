@@ -3,15 +3,21 @@
 // with `clco setup`, and overridable per run with the --no-* flags.
 
 import * as p from "@clack/prompts"
+import {
+  browserMcpConfig,
+  extensionHint,
+  extensionInstalled,
+} from "./browsermcp"
 import { loadPrefs, savePrefs, type SetupPrefs } from "./config"
 
 /** Bump when an option is added, so existing users get told once. */
-export const SETUP_VERSION = 1
+export const SETUP_VERSION = 2
 
 export interface SetupOverrides {
   bypass?: boolean
   chrome?: boolean
   select?: boolean
+  browser?: boolean
 }
 
 // What the first-run prompts come pre-filled with: these are the options
@@ -23,6 +29,7 @@ export const SETUP_DEFAULTS: Omit<SetupPrefs, "version"> = {
   bypass: true,
   chrome: true,
   select: true,
+  browser: true,
 }
 
 export async function runSetup(): Promise<SetupPrefs> {
@@ -51,6 +58,15 @@ export async function runSetup(): Promise<SetupPrefs> {
       current.chrome,
     ),
     select: await ask("Pick a model each time clco starts?", current.select),
+    browser: await ask(
+      "Register Browser MCP, to drive the Chrome you already have open?",
+      current.browser ?? true,
+    ),
+  }
+
+  if (setup.browser) {
+    // The server is only half of it, and the half clco cannot install.
+    p.note(extensionHint(await extensionInstalled()), "Browser MCP")
   }
 
   await savePrefs({ ...prefs, setup })
@@ -101,6 +117,15 @@ export function setupClaudeArgs(
   }
   if (setup.chrome && overrides.chrome !== false && !has("--chrome")) {
     out.push("--chrome")
+  }
+  // Registered per session rather than written into the user's MCP config, so
+  // clco never edits configuration that outlives it.
+  if (
+    setup.browser &&
+    overrides.browser !== false &&
+    !claudeArgs.includes("--mcp-config")
+  ) {
+    out.push("--mcp-config", browserMcpConfig())
   }
   return out
 }

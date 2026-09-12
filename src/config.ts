@@ -91,6 +91,8 @@ export interface SetupPrefs {
   bypass: boolean
   chrome: boolean
   select: boolean
+  /** Register the Browser MCP server for clco sessions. Added in v2. */
+  browser?: boolean
 }
 
 export interface Prefs {

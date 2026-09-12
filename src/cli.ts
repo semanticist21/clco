@@ -25,6 +25,7 @@ import {
 import { setAdapterLogSink, startServer } from "./server"
 import { buildModelPickerFrom, resolveClaude, runClaude } from "./spawn"
 import { TLS_HINT, isTlsTrustError } from "./tls"
+import { extensionHint, extensionInstalled } from "./browsermcp"
 import {
   loadSetup,
   runSetup,
@@ -88,6 +89,7 @@ const COMMAND_LIST = `Commands:
   clco --no-bypass     Re-enable permission prompts for this run
   clco --no-chrome     Disable chrome for this run
   clco --no-select     Skip the model prompt for this run
+  clco --no-browser    Skip the Browser MCP server for this run
   clco help            Show this help
 
 claude args pass through:  clco -p "ask"  /  clco --chrome  /  clco --dangerously-skip-permissions`
@@ -129,7 +131,12 @@ export function parseArgs(rawArgv: string[]): Args {
     }
     // Turn a saved setup option off for this run. Consumed here so it never
     // reaches claude, which has no --no-* form for any of these.
-    if (arg === "--no-bypass" || arg === "--no-chrome" || arg === "--no-select") {
+    if (
+      arg === "--no-bypass" ||
+      arg === "--no-chrome" ||
+      arg === "--no-select" ||
+      arg === "--no-browser"
+    ) {
       overrides[arg.slice(5) as keyof SetupOverrides] = false
       i++
       continue
@@ -339,12 +346,16 @@ async function runStatus(): Promise<void> {
 // than letting --chrome look like it did something.
 async function reportChromeCaveat(): Promise<void> {
   const prefs = await loadPrefs().catch(() => ({}) as Awaited<ReturnType<typeof loadPrefs>>)
-  if (!prefs.setup?.chrome) return
-  console.log(
-    "\nNote: --chrome is on, but the Claude Chrome extension needs a claude.ai\n" +
-      "  login and stays disabled on a Copilot backend. Use a browser MCP server\n" +
-      "  (playwright, chrome-devtools, puppeteer) instead - MCP works normally.",
-  )
+  if (prefs.setup?.chrome) {
+    console.log(
+      "\nNote: --chrome is on, but the Claude Chrome extension needs a claude.ai\n" +
+        "  login and stays disabled on a Copilot backend. Browser MCP covers the\n" +
+        "  same ground here - `clco setup` registers it.",
+    )
+  }
+  if (prefs.setup?.browser) {
+    console.log("\n" + extensionHint(await extensionInstalled()))
+  }
 }
 
 /** Matches LAUNCHER_VERSION in scripts/write-launcher.sh. */
