@@ -96,7 +96,7 @@ connect dialog every session:
 pbpaste | clco token       # clco token --clear to remove it
 ```
 
-Requires `npx` on PATH (Node.js) — clco says so at startup if it is missing.
+Started with `bunx` (or `npx`), fetched at session start — so on a network that blocks the npm registry, clco says so at startup rather than leaving you with missing tools.
 
 ## What clco reads
 
