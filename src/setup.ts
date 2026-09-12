@@ -164,8 +164,14 @@ export function setupClaudeArgs(
   return out
 }
 
-/** Whether to show the startup model picker for this run. */
-/** Environment the saved setup implies for the claude child. */
+/**
+ * Environment the saved setup implies for the claude child.
+ *
+ * The extension token travels here rather than in the --mcp-config payload:
+ * that payload is an argv element, and argv is readable by other local users.
+ * MCP servers inherit claude's environment, so this route reaches the same
+ * place without publishing it.
+ */
 export function setupEnv(
   setup: SetupPrefs | null,
   overrides: SetupOverrides,
@@ -176,6 +182,7 @@ export function setupEnv(
   return { [TOKEN_ENV]: setup.browserToken }
 }
 
+/** Whether to show the startup model picker for this run. */
 export function shouldSelectModel(
   setup: SetupPrefs | null,
   overrides: SetupOverrides,
