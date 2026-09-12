@@ -25,7 +25,7 @@ import {
 import { setAdapterLogSink, startServer } from "./server"
 import { buildModelPickerFrom, resolveClaude, runClaude } from "./spawn"
 import { TLS_HINT, isTlsTrustError } from "./tls"
-import { extensionHint, installedVariant } from "./browsermcp"
+import { extensionHint, extensionInstalled } from "./browsermcp"
 import {
   loadSetup,
   runSetup,
@@ -349,12 +349,12 @@ async function reportChromeCaveat(): Promise<void> {
   if (prefs.setup?.chrome) {
     console.log(
       "\nNote: --chrome is on, but the Claude Chrome extension needs a claude.ai\n" +
-        "  login and stays disabled on a Copilot backend. Browser MCP covers the\n" +
-        "  same ground here - `clco setup` registers it.",
+        "  login and stays disabled on a Copilot backend. Playwright MCP covers\n" +
+        "  the same ground here - `clco setup` enables it.",
     )
   }
   if (prefs.setup?.browser) {
-    console.log("\n" + extensionHint(await installedVariant()))
+    console.log("\n" + extensionHint(await extensionInstalled()))
   }
 }
 
@@ -595,7 +595,7 @@ async function main(): Promise<void> {
         setup,
         args.overrides,
         args.claudeArgs,
-        await installedVariant(),
+        await extensionInstalled(),
       ),
       ...args.claudeArgs,
     ],

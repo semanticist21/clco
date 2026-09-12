@@ -1,9 +1,9 @@
 import { describe, expect, test } from "bun:test"
 import {
-  BROWSER_MCP_VARIANTS,
+  MCP_PACKAGE,
   browserMcpConfig,
   extensionHint,
-  installedVariant,
+  extensionInstalled,
 } from "../src/browsermcp"
 import { setupClaudeArgs, shouldSelectModel } from "../src/setup"
 
@@ -79,25 +79,30 @@ describe("defaults", () => {
   })
 })
 
-describe("browser MCP registration", () => {
+describe("browser control", () => {
   test("registers the server for the session, without touching MCP config", () => {
-    const variant = BROWSER_MCP_VARIANTS[0]!
-    const args = setupClaudeArgs(saved({ browser: true }), {}, [], variant)
+    const args = setupClaudeArgs(saved({ browser: true }), {}, [], true)
     const i = args.indexOf("--mcp-config")
     expect(i).toBeGreaterThan(-1)
-    expect(JSON.parse(args[i + 1]!).mcpServers["browser-mcp"].args).toContain(
-      variant.package,
+    const server = JSON.parse(args[i + 1]!).mcpServers.playwright
+    expect(server.args).toContain(MCP_PACKAGE)
+    // Without this the server drives its own browser instead of attaching to
+    // the tab the user shared.
+    expect(server.args).toContain("--extension")
+  })
+
+  // The extension is the half clco cannot install; registering the server
+  // alone would surface tools that fail on every call.
+  test("registers nothing when the extension is missing", () => {
+    expect(setupClaudeArgs(saved({ browser: true }), {}, [], false)).not.toContain(
+      "--mcp-config",
     )
+    expect(browserMcpConfig(false)).toBeNull()
   })
 
   test("--no-browser skips it for one run", () => {
     expect(
-      setupClaudeArgs(
-        saved({ browser: true }),
-        { browser: false },
-        [],
-        BROWSER_MCP_VARIANTS[0]!,
-      ),
+      setupClaudeArgs(saved({ browser: true }), { browser: false }, [], true),
     ).not.toContain("--mcp-config")
   })
 
@@ -105,41 +110,15 @@ describe("browser MCP registration", () => {
   // one silently would change what they asked for.
   test("defers to an --mcp-config the user passed", () => {
     expect(
-      setupClaudeArgs(
-        saved({ browser: true }),
-        {},
-        ["--mcp-config", "x.json"],
-        BROWSER_MCP_VARIANTS[0]!,
-      ),
+      setupClaudeArgs(saved({ browser: true }), {}, ["--mcp-config", "x.json"], true),
     ).not.toContain("--mcp-config")
   })
-})
 
-describe("extension detection", () => {
-  test("reports no variant without probing the network", async () => {
+  test("reports the extension without probing the network", async () => {
     // The server is spawned per conversation, so nothing listens at startup;
     // detection has to be filesystem-based to avoid a false negative.
-    expect(await installedVariant("/nonexistent-home")).toBeNull()
-    expect(extensionHint(null)).toContain("chromewebstore.google.com")
-    expect(extensionHint(BROWSER_MCP_VARIANTS[0]!)).toContain("detected")
-  })
-
-  // Each extension only talks to its own server, so registering the wrong
-  // package yields tools that fail on every call.
-  test("registers the package matching the installed extension", () => {
-    for (const v of BROWSER_MCP_VARIANTS) {
-      expect(JSON.parse(browserMcpConfig(v)!).mcpServers["browser-mcp"].args)
-        .toContain(v.package)
-    }
-    expect(browserMcpConfig(null)).toBeNull()
-  })
-
-  // Microsoft's is an order of magnitude more used and still shipping, so it
-  // wins when a machine has more than one extension installed.
-  test("prefers Playwright MCP, and passes the flag it needs to attach", () => {
-    const first = BROWSER_MCP_VARIANTS[0]!
-    expect(first.package).toBe("@playwright/mcp@latest")
-    expect(JSON.parse(browserMcpConfig(first)!).mcpServers["browser-mcp"].args)
-      .toContain("--extension")
+    expect(await extensionInstalled("/nonexistent-home")).toBe(false)
+    expect(extensionHint(false)).toContain("chromewebstore.google.com")
+    expect(extensionHint(true)).toContain("detected")
   })
 })

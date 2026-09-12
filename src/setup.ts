@@ -6,8 +6,7 @@ import * as p from "@clack/prompts"
 import {
   browserMcpConfig,
   extensionHint,
-  installedVariant,
-  type BrowserMcpVariant,
+  extensionInstalled,
 } from "./browsermcp"
 import { loadPrefs, savePrefs, type SetupPrefs } from "./config"
 
@@ -60,14 +59,14 @@ export async function runSetup(): Promise<SetupPrefs> {
     ),
     select: await ask("Pick a model each time clco starts?", current.select),
     browser: await ask(
-      "Register Browser MCP, to drive the Chrome you already have open?",
+      "Enable browser control (Playwright MCP) for the tab you share?",
       current.browser ?? true,
     ),
   }
 
   if (setup.browser) {
     // The server is only half of it, and the half clco cannot install.
-    p.note(extensionHint(await installedVariant()), "Browser MCP")
+    p.note(extensionHint(await extensionInstalled()), "Browser control")
   }
 
   await savePrefs({ ...prefs, setup })
@@ -105,8 +104,8 @@ export function setupClaudeArgs(
   setup: SetupPrefs | null,
   overrides: SetupOverrides,
   claudeArgs: string[],
-  /** Which Browser MCP extension is installed, if any. */
-  variant: BrowserMcpVariant | null = null,
+  /** Whether the Playwright MCP Bridge extension is installed. */
+  browserExtension = false,
 ): string[] {
   if (!setup) return []
   const has = (flag: string) => claudeArgs.some((a) => a === flag)
@@ -128,7 +127,7 @@ export function setupClaudeArgs(
     overrides.browser !== false &&
     !claudeArgs.includes("--mcp-config")
   ) {
-    const config = browserMcpConfig(variant)
+    const config = browserMcpConfig(browserExtension)
     if (config) out.push("--mcp-config", config)
   }
   return out

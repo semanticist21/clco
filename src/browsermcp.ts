@@ -1,4 +1,4 @@
-// Browser control for clco sessions.
+// Browser control for clco sessions, via Playwright MCP.
 //
 // Claude Code's own Chrome integration (--chrome) is gated on the session's
 // OAuth scope and is therefore always off here: clco authenticates with
@@ -6,94 +6,58 @@
 // env-var session limited to user:inference. An MCP server has no such gate,
 // so browser control has to come from one.
 //
-// Browser MCP drives the Chrome you already have open, with your logins and
-// cookies intact, rather than the fresh profile a Playwright-style server
-// starts. It is two halves: this server, and a Chrome extension that only the
-// user can install.
+// Playwright MCP in --extension mode attaches to a tab already open in the
+// user's own browser, with their logins and cookies intact, rather than the
+// fresh profile a headless run would get. Other projects do the same thing,
+// but this is the one with ~4.6M weekly downloads and active releases, so
+// clco supports exactly it rather than maintaining a catalogue.
 
 import { readdir } from "node:fs/promises"
 import { homedir, platform } from "node:os"
 import { join } from "node:path"
 
-// Two unrelated projects ship under this name, each with its own extension
-// and npm package, and they are not interchangeable: the extension talks to
-// its own server. So detect which one is actually installed and register that
-// one, rather than picking for the user.
-export interface BrowserMcpVariant {
-  id: string
-  label: string
-  package: string
-  /** Extra CLI args the server needs to attach to the running browser. */
-  args: string[]
-  storeUrl: string
-}
+export const EXTENSION_ID = "mmlmfjhmonkocbjadbfplnigmagldckm"
+export const EXTENSION_NAME = "Playwright MCP Bridge"
+export const EXTENSION_URL =
+  `https://chromewebstore.google.com/detail/playwright-extension/${EXTENSION_ID}`
+export const MCP_PACKAGE = "@playwright/mcp@latest"
 
-// Ordered by what should win when more than one is installed: Microsoft's
-// Playwright MCP first (~4.6M weekly npm downloads, actively released),
-// then the smaller projects. browsermcp.io is last because its npm package
-// has not been published since 2025-04 even though the extension still
-// installs — recommending it would be pointing at an unmaintained half.
-export const BROWSER_MCP_VARIANTS: readonly BrowserMcpVariant[] = [
-  {
-    id: "mmlmfjhmonkocbjadbfplnigmagldckm",
-    label: "Playwright MCP Bridge (Microsoft)",
-    package: "@playwright/mcp@latest",
-    args: ["--extension"],
-    storeUrl:
-      "https://chromewebstore.google.com/detail/playwright-extension/mmlmfjhmonkocbjadbfplnigmagldckm",
-  },
-  {
-    id: "jdehgalffmffhfhmmhaokfbfnafnmgcl",
-    label: "Agent360 Browser MCP",
-    package: "@agent360/browser-mcp@latest",
-    args: [],
-    storeUrl:
-      "https://chromewebstore.google.com/detail/agent360-browser-mcp/jdehgalffmffhfhmmhaokfbfnafnmgcl",
-  },
-  {
-    id: "bjfgambnhccakkhmkepdoekmckoijdlc",
-    label: "Browser MCP (browsermcp.io, unmaintained since 2025-04)",
-    package: "@browsermcp/mcp@latest",
-    args: [],
-    storeUrl:
-      "https://chromewebstore.google.com/detail/bjfgambnhccakkhmkepdoekmckoijdlc",
-  },
-]
-
-/** Chrome's per-profile extension directories, by platform. */
-function chromeRoots(home = homedir()): string[] {
+/**
+ * Per-profile extension directories, by platform. Edge is included because
+ * both the extension and --extension mode support it.
+ */
+function browserRoots(home = homedir()): string[] {
   switch (platform()) {
     case "darwin":
-      return [join(home, "Library", "Application Support", "Google", "Chrome")]
-    case "win32":
       return [
-        join(
-          process.env.LOCALAPPDATA ?? join(home, "AppData", "Local"),
-          "Google",
-          "Chrome",
-          "User Data",
-        ),
+        join(home, "Library", "Application Support", "Google", "Chrome"),
+        join(home, "Library", "Application Support", "Microsoft Edge"),
       ]
+    case "win32": {
+      const local = process.env.LOCALAPPDATA ?? join(home, "AppData", "Local")
+      return [
+        join(local, "Google", "Chrome", "User Data"),
+        join(local, "Microsoft", "Edge", "User Data"),
+      ]
+    }
     default:
       return [
         join(home, ".config", "google-chrome"),
         join(home, ".config", "chromium"),
+        join(home, ".config", "microsoft-edge"),
       ]
   }
 }
 
 /**
- * Whether the Chrome extension is present on disk.
+ * Whether the bridge extension is installed.
  *
- * Deliberately not probed over the network: the server is spawned per
- * conversation on a port in 9876-9895, so at clco startup nothing is listening
- * and a probe would report "missing" for a working install.
+ * Deliberately not probed over the network: the MCP server is spawned per
+ * conversation, so at clco startup nothing is listening and a probe would
+ * report "missing" for a working install.
  */
-export async function installedVariant(
-  home = homedir(),
-): Promise<BrowserMcpVariant | null> {
-  const present = new Set<string>()
-  for (const root of chromeRoots(home)) {
+export async function extensionInstalled(home = homedir()): Promise<boolean> {
+  for (const root of browserRoots(home)) {
     let profiles: string[]
     try {
       profiles = await readdir(root)
@@ -102,43 +66,35 @@ export async function installedVariant(
     }
     for (const profile of profiles) {
       try {
-        for (const id of await readdir(join(root, profile, "Extensions"))) {
-          present.add(id)
-        }
+        const ids = await readdir(join(root, profile, "Extensions"))
+        if (ids.includes(EXTENSION_ID)) return true
       } catch {
         // not a profile directory, or no extensions in it
       }
     }
   }
-  return BROWSER_MCP_VARIANTS.find((v) => present.has(v.id)) ?? null
+  return false
 }
 
 /**
  * The --mcp-config payload registering the server for this session only.
- * Null when no extension is installed: registering a server whose other half
- * is missing only produces tools that fail on every call.
+ * Null without the extension: the server is only half of it, and registering
+ * it alone produces tools that fail on every call.
  */
-export function browserMcpConfig(variant: BrowserMcpVariant | null): string | null {
-  if (!variant) return null
+export function browserMcpConfig(installed: boolean): string | null {
+  if (!installed) return null
   return JSON.stringify({
     mcpServers: {
-      "browser-mcp": {
-        command: "npx",
-        args: ["-y", variant.package, ...variant.args],
-      },
+      playwright: { command: "npx", args: ["-y", MCP_PACKAGE, "--extension"] },
     },
   })
 }
 
-export function extensionHint(variant: BrowserMcpVariant | null): string {
-  if (variant) {
-    return `${variant.label} detected - registering ${variant.package}.\n` +
-      `Tools arrive as mcp__browser-mcp__*.`
-  }
-  return (
-    "Browser MCP is two halves, and the Chrome extension is the half only you\n" +
-    "can install. Pick either, then re-run `clco setup`:\n" +
-    BROWSER_MCP_VARIANTS.map((v) => `  ${v.label}\n    ${v.storeUrl}`).join("\n") +
-    "\nUntil one is installed, clco registers no browser server."
-  )
+export function extensionHint(installed: boolean): string {
+  return installed
+    ? `${EXTENSION_NAME} detected - registering ${MCP_PACKAGE} --extension.\n` +
+        `Tools arrive as mcp__playwright__*. Click the extension to share a tab.`
+    : `Browser control needs the ${EXTENSION_NAME} extension, which only you\n` +
+        `can install:\n  ${EXTENSION_URL}\n` +
+        `Until then clco registers no browser server, so no tools appear.`
 }
