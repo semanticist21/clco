@@ -40,7 +40,19 @@ import {
 } from "./setup"
 import { normalizeModel } from "./translate"
 
-const HELP = `clco — run Claude Code on your GitHub Copilot subscription
+// Single source: the package manifest. appDir() resolves the install even
+// when clco is started through the launcher from another directory.
+const VERSION: string = await (async () => {
+  try {
+    const dir = appDir() ?? join(import.meta.dir, "..")
+    const raw = await readFile(join(dir, "package.json"), "utf8")
+    return (JSON.parse(raw) as { version?: string }).version ?? "unknown"
+  } catch {
+    return "unknown"
+  }
+})()
+
+const HELP = `clco v${VERSION} — run Claude Code on your GitHub Copilot subscription
 
 Usage:
   clco [--port N] [claude args...]
@@ -72,7 +84,7 @@ Environment:
 interface Args {
   command:
     | "run" | "serve" | "auth" | "login" | "logout" | "update" | "status"
-    | "setup"
+    | "setup" | "version"
   port?: number
   /** Saved setup options turned off for this run via --no-*. */
   overrides: SetupOverrides
@@ -95,6 +107,7 @@ const COMMAND_LIST = `Commands:
   clco --no-select     Skip the model prompt for this run
   clco --no-browser    Skip the Browser MCP server for this run
   clco help            Show this help
+  clco version         Print the version
 
 claude args pass through:  clco -p "ask"  /  clco --chrome  /  clco --dangerously-skip-permissions`
 
@@ -116,7 +129,7 @@ export function parseArgs(rawArgv: string[]): Args {
     if (
       (arg === "serve" || arg === "auth" || arg === "login" ||
         arg === "logout" || arg === "update" || arg === "status" ||
-        arg === "setup") &&
+        arg === "setup" || arg === "version") &&
       command === "run"
     ) {
       command = arg
@@ -281,6 +294,7 @@ async function runStatus(): Promise<void> {
       lookupNote = `lookup failed (${err instanceof Error ? err.message : String(err)})`
     }
   }
+  console.log(`clco v${VERSION}`)
   console.log(
     `Account: ${login ? `@${login}` : `(signed in${lookupNote ? ` - username ${lookupNote}` : ""})`}`,
   )
@@ -422,6 +436,11 @@ async function main(): Promise<void> {
 
   if (args.command === "update") {
     await runUpdate()
+    return
+  }
+
+  if (args.command === "version") {
+    console.log(VERSION)
     return
   }
 

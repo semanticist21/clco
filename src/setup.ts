@@ -46,45 +46,43 @@ export async function runSetup(): Promise<SetupPrefs> {
     return answer as boolean
   }
 
-  const setup: SetupPrefs = {
-    version: SETUP_VERSION,
-    bypass: await ask(
-      "Run without permission prompts? (--dangerously-skip-permissions)",
-      current.bypass,
-    ),
-    // Claude's own Chrome integration cannot work here, so there is nothing to
-    // ask about it — only an alternative to offer.
-    browser: await ask(
-      "Claude Chrome is not available in clco.\n" +
-        "  Enable Playwright MCP for browser control instead?",
-      current.browser ?? true,
-    ),
-    select: await ask("Pick a model each time clco starts?", current.select),
-  }
+  // Sequential rather than one object literal: the browser follow-ups have to
+  // run between the browser answer and the next question, and inside a literal
+  // every property is evaluated before any code after it.
+  const setup: SetupPrefs = { ...SETUP_DEFAULTS, version: SETUP_VERSION }
 
+  setup.bypass = await ask(
+    "Run without permission prompts? (--dangerously-skip-permissions)",
+    current.bypass,
+  )
+
+  // Claude's own Chrome integration cannot work here, so there is nothing to
+  // ask about it - only an alternative to offer.
+  setup.browser = await ask(
+    "Claude Chrome is not available in clco.\n" +
+      "  Enable Playwright MCP for browser control instead?",
+    current.browser ?? true,
+  )
   if (setup.browser) {
-    const installed = await extensionInstalled()
-    // State first, then the one question that state makes sensible. The
-    // extension is the half of the install only the user can add, so without
-    // it there is nothing to configure yet.
-    p.note(setupNote(installed), "Playwright MCP")
-    if (installed) {
-      // Offered rather than required: without it the session still attaches,
-      // just with a click each time.
-      const token = await p.text({
-        message:
-          `${TOKEN_ENV} (optional) - skips the connect dialog every session.\n` +
-          "  Paste the whole line from the extension, or just the value.\n" +
-          "  Enter to skip.",
-        placeholder: "leave empty to skip",
-        defaultValue: current.browserToken ?? "",
-      })
-      if (!p.isCancel(token)) {
-        const parsed = parseToken(String(token))
-        if (parsed) setup.browserToken = parsed
-      }
+    p.note(setupNote(await extensionInstalled()), "Playwright MCP")
+    const token = await p.text({
+      message:
+        `${TOKEN_ENV} (optional) - skips the connect dialog every session.\n` +
+        "  Paste the whole line from the extension, or just the value.\n" +
+        "  Enter to skip.",
+      placeholder: "leave empty to skip",
+      defaultValue: current.browserToken ?? "",
+    })
+    if (!p.isCancel(token)) {
+      const parsed = parseToken(String(token))
+      if (parsed) setup.browserToken = parsed
     }
   }
+
+  setup.select = await ask(
+    "Pick a model each time clco starts?",
+    current.select,
+  )
 
   await savePrefs({ ...prefs, setup })
   p.outro(

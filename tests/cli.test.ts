@@ -63,3 +63,9 @@ describe("parseArgs — setup", () => {
     expect(args.claudeArgs).toEqual(["-p", "hi"])
   })
 })
+
+describe("parseArgs — version", () => {
+  test("recognises the version command", () => {
+    expect(parseArgs(["version"]).command).toBe("version")
+  })
+})
