@@ -6,8 +6,9 @@ import * as p from "@clack/prompts"
 import {
   TOKEN_ENV,
   browserMcpConfig,
-  extensionHint,
   extensionInstalled,
+  parseToken,
+  setupNote,
 } from "./browsermcp"
 import { loadPrefs, savePrefs, type SetupPrefs } from "./config"
 
@@ -63,24 +64,26 @@ export async function runSetup(): Promise<SetupPrefs> {
 
   if (setup.browser) {
     const installed = await extensionInstalled()
+    // State first, then the one question that state makes sensible. The
+    // extension is the half of the install only the user can add, so without
+    // it there is nothing to configure yet.
+    p.note(setupNote(installed), "Playwright MCP")
     if (installed) {
       // Offered rather than required: without it the session still attaches,
       // just with a click each time.
       const token = await p.text({
         message:
-          `${TOKEN_ENV} (optional) - the extension shows one; storing it\n` +
-          "  skips the connect dialog every session. Enter to skip.",
+          `${TOKEN_ENV} (optional) - skips the connect dialog every session.\n` +
+          "  Paste the whole line from the extension, or just the value.\n" +
+          "  Enter to skip.",
         placeholder: "leave empty to skip",
         defaultValue: current.browserToken ?? "",
       })
       if (!p.isCancel(token)) {
-        const trimmed = String(token).trim()
-        if (trimmed) setup.browserToken = trimmed
+        const parsed = parseToken(String(token))
+        if (parsed) setup.browserToken = parsed
       }
     }
-    // Registering the server is only half an install; the extension is the
-    // half only the user can add.
-    p.note(extensionHint(installed, setup.browserToken), "Playwright MCP")
   }
 
   await savePrefs({ ...prefs, setup })

@@ -92,6 +92,33 @@ export function browserMcpConfig(installed: boolean): string | null {
   })
 }
 
+/**
+ * Accept what the extension actually puts on screen. It shows the whole
+ * assignment, so pasting that verbatim is the obvious move — as is pasting
+ * just the value, or a line copied with `export` in front. Take any of them.
+ */
+export function parseToken(input: string): string | undefined {
+  const line = input.trim().replace(/^export\s+/, "")
+  const value = line.startsWith(`${TOKEN_ENV}=`)
+    ? line.slice(TOKEN_ENV.length + 1)
+    : line
+  // Shell-style quoting survives a copy from a snippet.
+  return value.trim().replace(/^(['"])(.*)\1$/, "$2").trim() || undefined
+}
+
+/**
+ * What setup shows before asking anything: the state, without advice to run
+ * the very command that is running.
+ */
+export function setupNote(installed: boolean): string {
+  return installed
+    ? `${EXTENSION_NAME} detected - registering ${MCP_PACKAGE} --extension.\n` +
+        `Tools arrive as mcp__playwright__*. Click the extension to share a tab.`
+    : `The ${EXTENSION_NAME} extension is not installed, and only you can\n` +
+        `add it:\n  ${EXTENSION_URL}\n` +
+        `Until then clco registers no browser server, so no tools appear.`
+}
+
 export function extensionHint(installed: boolean, token?: string): string {
   if (!installed) {
     return (

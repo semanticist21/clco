@@ -4,6 +4,7 @@ import {
   browserMcpConfig,
   extensionHint,
   extensionInstalled,
+  parseToken,
 } from "../src/browsermcp"
 import { setupClaudeArgs, setupEnv, shouldSelectModel } from "../src/setup"
 
@@ -143,5 +144,27 @@ describe("extension token", () => {
     expect(extensionHint(true, "tok")).toContain("without the connect dialog")
     expect(extensionHint(true)).toContain("connect dialog")
     expect(extensionHint(true)).toContain("PLAYWRIGHT_MCP_EXTENSION_TOKEN")
+  })
+})
+
+describe("token parsing", () => {
+  // The extension displays the whole assignment, so that is what gets pasted.
+  test("accepts the value, the assignment, or an exported line", () => {
+    const want = "vsniGjCK1P0voIepAYLL"
+    for (const input of [
+      want,
+      `PLAYWRIGHT_MCP_EXTENSION_TOKEN=${want}`,
+      `export PLAYWRIGHT_MCP_EXTENSION_TOKEN=${want}`,
+      `  PLAYWRIGHT_MCP_EXTENSION_TOKEN="${want}"  `,
+      `PLAYWRIGHT_MCP_EXTENSION_TOKEN='${want}'`,
+    ]) {
+      expect(parseToken(input)).toBe(want)
+    }
+  })
+
+  test("treats an empty answer as skipped", () => {
+    expect(parseToken("")).toBeUndefined()
+    expect(parseToken("   ")).toBeUndefined()
+    expect(parseToken("PLAYWRIGHT_MCP_EXTENSION_TOKEN=")).toBeUndefined()
   })
 })
