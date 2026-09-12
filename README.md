@@ -62,11 +62,9 @@ clco help              # all commands and environment variables
 the Claude ones. Each row shows the upstream id, its route, its real context
 window, and whether it supports `/effort`.
 
-Whether a model actually answers depends on your plan, and **Copilot's own
-metadata does not predict it** — models marked `enabled` can still refuse, and
-models marked `disabled` can work. `clco status` shows what Copilot reports;
-trying is the only way to know. On a restricted plan expect
-`400 The requested model is not supported` for most of them.
+What your plan actually allows is a separate matter, and Copilot's metadata does
+not predict it — a model can be marked `enabled` and still refuse. Picking one
+your plan does not cover answers `400 The requested model is not supported`.
 
 Pin a model instead of choosing: `clco --model kimi-k3`, or per slot with
 `CLCO_OPUS` / `CLCO_SONNET` / `CLCO_HAIKU` / `CLCO_FABLE`.
