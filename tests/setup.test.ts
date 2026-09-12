@@ -10,7 +10,12 @@ import {
   parseToken,
   startupLine,
 } from "../src/browsermcp"
-import { setupClaudeArgs, setupEnv, shouldSelectModel } from "../src/setup"
+import {
+  modelWithoutPrompt,
+  setupClaudeArgs,
+  setupEnv,
+  shouldSelectModel,
+} from "../src/setup"
 
 const saved = (over: Partial<Record<string, boolean>> = {}) => ({
   version: 2,
@@ -362,6 +367,30 @@ describe("startup line honesty", () => {
     )
     expect(startupLine(true, true, "tok", true, "ok", true)).toBe(
       "+ browser: @playwright/mcp@latest",
+    )
+  })
+})
+
+describe("model when the prompt is off", () => {
+  const offered = ["claude-sonnet-5", "gpt-4.1-2025-04-14"]
+
+  // Answering no to "pick a model each time" used to pass no --model at all,
+  // so claude fell back to its own newest built-in and every launch started on
+  // Fable - a model the user had never chosen.
+  test("reuses the remembered pick", () => {
+    expect(
+      modelWithoutPrompt("gpt-4.1-2025-04-14", offered, "claude-sonnet-5"),
+    ).toBe("gpt-4.1-2025-04-14")
+  })
+
+  // Never picked one, or picked one this account no longer offers: the slot
+  // clco advertises on its startup line is the honest answer.
+  test("falls back to the sonnet slot", () => {
+    expect(modelWithoutPrompt(undefined, offered, "claude-sonnet-5")).toBe(
+      "claude-sonnet-5",
+    )
+    expect(modelWithoutPrompt("kimi-k3", offered, "claude-sonnet-5")).toBe(
+      "claude-sonnet-5",
     )
   })
 })

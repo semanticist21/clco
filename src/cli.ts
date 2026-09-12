@@ -37,6 +37,7 @@ import {
   runSetup,
   setupClaudeArgs,
   setupEnv,
+  modelWithoutPrompt,
   shouldSelectModel,
   type SetupOverrides,
 } from "./setup"
@@ -586,6 +587,20 @@ async function main(): Promise<void> {
   const list = upstreamModels()
 
   let defaultModel: string | undefined
+  const prefs = await loadPrefs().catch(
+    () => ({}) as Awaited<ReturnType<typeof loadPrefs>>,
+  )
+  // Offer exactly what /model will: the raw upstream list also carries
+  // embeddings and Copilot's internal plumbing, which cannot hold a
+  // conversation at all, and repeats display names across several slugs.
+  const pickerRows = buildModelPickerFrom(list)?.options ?? []
+  const offered = pickerRows.map((o) => normalizeModel(o.model))
+  // A remembered model the current account no longer offers would preselect a
+  // row that is not there.
+  const remembered =
+    prefs.last_model && offered.includes(prefs.last_model)
+      ? prefs.last_model
+      : undefined
   if (
     args.command === "run" &&
     !printMode &&
@@ -594,17 +609,8 @@ async function main(): Promise<void> {
     shouldSelectModel(setup, args.overrides) &&
     list.length > 0
   ) {
-    const prefs = await loadPrefs()
-    // Offer exactly what /model will: the raw upstream list also carries
-    // embeddings and Copilot's internal plumbing, which cannot hold a
-    // conversation at all, and repeats display names across several slugs.
-    const picker = buildModelPickerFrom(list)
-    const rows = picker?.options ?? []
-    // A remembered model the current account no longer offers would preselect
-    // a row that is not there.
-    const last = rows.some((o) => normalizeModel(o.model) === prefs.last_model)
-      ? prefs.last_model
-      : undefined
+    const rows = pickerRows
+    const last = remembered
     const selected = await p.autocomplete({
       message: "Pick a model - type to search",
       placeholder: "Search models...",
@@ -629,6 +635,8 @@ async function main(): Promise<void> {
     } catch {
       console.error("[clco] ! could not save the model choice (check permissions on the config directory)")
     }
+  } else if (list.length > 0) {
+    defaultModel = modelWithoutPrompt(remembered, offered, models.sonnet)
   }
 
   const server = await startServer({ port: args.port })
