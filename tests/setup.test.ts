@@ -348,6 +348,11 @@ describe("registry reachability", () => {
     expect(startupLine(true, true, "tok", true, "ok")).toBe(
       "+ browser: @playwright/mcp@latest",
     )
+    // The host answered and the dates failed, so neither "cannot reach" nor a
+    // CA is the right answer.
+    const expired = startupLine(true, true, "tok", true, "expired")!
+    expect(expired).toContain("expired certificate")
+    expect(expired).toContain("No CA file fixes this")
     // A slow proxy is not a verdict: the bunx inside claude has no 2.5s
     // budget, so predicting that tools "will not appear" would be wrong.
     const slow = startupLine(true, true, "tok", true, "slow")!
@@ -433,12 +438,40 @@ describe("TLS advice adapts to what is already configured", () => {
 
 // The probe only knows registry.npmjs.org. A spec pointing elsewhere is not
 // probed, and a bare "+" there would assert a check that never ran.
-describe("a registry clco cannot probe", () => {
+describe("a package clco cannot probe", () => {
   test("says the check did not run", () => {
     const line = startupLine(
       true, true, "tok", true, undefined, undefined, "@corp/mcp@1.2.3",
     )!
-    expect(line).toBe("+ browser: @corp/mcp@1.2.3 (registry not checked)")
+    expect(line).toBe(
+      "+ browser: @corp/mcp@1.2.3 (not the default package, so the registry check was skipped)",
+    )
+  })
+
+  // Two same-shaped parentheticals in a row read as unrelated afterthoughts on
+  // the line that is meant to be clco's clearest summary.
+  test("merges into one parenthetical when the token is missing too", () => {
+    expect(
+      startupLine(true, true, undefined, true, undefined, undefined, "@corp/mcp@1.2.3"),
+    ).toBe(
+      "+ browser: @corp/mcp@1.2.3 (not the default package, so the registry" +
+        " check was skipped; connect dialog each session)",
+    )
+  })
+
+  // A file:/link: version needs no registry at all, so probing npmjs and
+  // predicting "browser tools will not appear" would be about nothing.
+  test("a local version is not a registry spec", () => {
+    expect(probesDefaultRegistry("@playwright/mcp@file:/opt/local-mcp")).toBe(false)
+    expect(probesDefaultRegistry("@playwright/mcp@link:../mcp")).toBe(false)
+  })
+
+  // lastIndexOf returns -1 with no "@" and slice(0, -1) then drops the last
+  // character, which only stayed harmless because MCP_PACKAGE is scoped.
+  test("a spec with no version keeps its whole name", () => {
+    expect(probesDefaultRegistry("@playwright/mcp")).toBe(true)
+    expect(probesDefaultRegistry("playwright-mcp")).toBe(false)
+    expect(probesDefaultRegistry("@playwright/mcp-fork@1.0.0")).toBe(false)
   })
 
   // A pin or a rollback still comes from npmjs, so the check is as truthful as

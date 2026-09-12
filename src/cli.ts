@@ -24,7 +24,7 @@ import {
 } from "./token"
 import { setAdapterLogSink, startServer } from "./server"
 import { buildModelPickerFrom, resolveClaude, runClaude } from "./spawn"
-import { TLS_HINT, isTlsTrustError } from "./tls"
+import { isTlsTrustError, tlsHint } from "./tls"
 import {
   extensionHint,
   extensionInstalled,
@@ -634,7 +634,9 @@ async function main(): Promise<void> {
     } catch {
       console.error("[clco] ! could not save the model choice (check permissions on the config directory)")
     }
-  } else {
+  } else if (args.command !== "serve") {
+    // serve never calls runClaude, so a model resolved here is unreachable -
+    // and a live-looking variable on a dead path is a trap for the next reader.
     defaultModel = modelWithoutPrompt(remembered, offered, models.sonnet)
   }
 
@@ -658,7 +660,7 @@ async function main(): Promise<void> {
   // serve never spawns claude, so naming a session model there would advertise
   // a routing decision no process makes. The slot list is still useful to
   // someone pointing their own claude at the adapter.
-  const slots = `sonnet=${models.sonnet} opus=${models.opus} haiku=${models.haiku}`
+  const slots = `sonnet=${models.sonnet} opus=${models.opus} haiku=${models.haiku} fable=${models.fable}`
   console.error(
     args.command === "serve"
       ? `+ slots: ${slots}`
@@ -713,7 +715,7 @@ if (import.meta.main) {
   main().catch((err) => {
     const message = err instanceof Error ? err.message : String(err)
     console.error(
-      `Error: ${message}${isTlsTrustError(err) ? TLS_HINT : ""}`,
+      `Error: ${message}${isTlsTrustError(err) ? tlsHint() : ""}`,
     )
     process.exit(1)
   })

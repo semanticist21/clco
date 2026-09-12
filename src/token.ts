@@ -221,6 +221,7 @@ export async function discoverModels(): Promise<ModelMapping> {
     fable: env("CLCO_FABLE"),
   }
   let reason = ""
+  let noClaudeModels = false
   try {
     const token = await getCopilotToken()
     const res = await copilotFetch(`${copilotBaseUrl()}/models`, {
@@ -268,6 +269,11 @@ export async function discoverModels(): Promise<ModelMapping> {
           fable,
         }
       }
+      // The list arrived and simply has no Claude models in it - a fact about
+      // this plan, not about the network. Falling through to the generic
+      // message below announced "discovery failed" about a request that
+      // returned 200 and whose result is already driving the picker.
+      noClaudeModels = true
     }
   } catch (err) {
     reason = err instanceof Error ? err.message : String(err)
@@ -278,9 +284,11 @@ export async function discoverModels(): Promise<ModelMapping> {
   }
   // Reported by the caller after any progress spinner has stopped; printing
   // here would be painted over by the spinner that wraps this call.
-  softFailure =
-    `[clco] Copilot /models discovery failed (${copilotBaseUrl()}${reason ? `: ${reason}` : ""})` +
-    ` - falling back to default slugs (override with CLCO_OPUS/SONNET/HAIKU)`
+  softFailure = noClaudeModels
+    ? `[clco] Copilot serves no Claude model on this plan - the opus/sonnet/haiku` +
+      ` slots are guesses (override with CLCO_OPUS/SONNET/HAIKU)`
+    : `[clco] Copilot /models discovery failed (${copilotBaseUrl()}${reason ? `: ${reason}` : ""})` +
+      ` - falling back to default slugs (override with CLCO_OPUS/SONNET/HAIKU)`
   return {
     opus: overrides.opus ?? FALLBACK_MODELS.opus,
     sonnet: overrides.sonnet ?? FALLBACK_MODELS.sonnet,

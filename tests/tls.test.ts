@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test"
-import { isTlsTrustError } from "../src/tls"
+import { isCertValidityError, isTlsTrustError } from "../src/tls"
 import { registryStatus } from "../src/browsermcp"
 
 // These are the literal messages and codes Bun's fetch produces, measured
@@ -83,6 +83,21 @@ describe("registryStatus", () => {
 // fix it - and saying otherwise sent the user to export a certificate that
 // could not help.
 describe("what is not a trust failure", () => {
+  // A lapsed proxy certificate is an ordinary corporate failure. No CA fixes
+  // it, so it is not a trust error - but the host answered, so reporting it as
+  // unreachable sent the user to their firewall team.
+  test.each([
+    ["certificate has expired", "CERT_HAS_EXPIRED"],
+    ["certificate is not yet valid", "CERT_NOT_YET_VALID"],
+  ])("%s is validity, not trust", (message, code) => {
+    const err = Object.assign(new Error(message), { code })
+    expect(isTlsTrustError(err)).toBe(false)
+    expect(isCertValidityError(err)).toBe(true)
+    // server.ts classifies a stringified upstream detail, so the message path
+    // has to work on its own or the new line is unreachable there.
+    expect(isCertValidityError(message)).toBe(true)
+  })
+
   test("a hostname mismatch is not", () => {
     const err = Object.assign(
       new Error('ERR_TLS_CERT_ALTNAME_INVALID fetching "https://127.0.0.1:9556/"'),
@@ -104,8 +119,11 @@ describe("what is not a trust failure", () => {
 })
 
 // Every caller is a catch block, so a throw from here escapes the handler that
-// was about to render a 502 or print the user's real error.
-describe("isTlsTrustError cannot throw", () => {
+// was about to render a 502 or print the user's real error. These are the
+// shapes that used to overflow the stack - not a totality claim: an object
+// whose `cause` getter throws still propagates, and nothing suggests Bun or
+// undici produces one.
+describe("isTlsTrustError survives a looping error chain", () => {
   test("survives a cyclic cause chain", () => {
     const a = new Error("a") as Error & { cause?: unknown }
     const b = new Error("b") as Error & { cause?: unknown }
@@ -114,9 +132,11 @@ describe("isTlsTrustError cannot throw", () => {
     expect(isTlsTrustError(a)).toBe(false)
   })
 
-  test("survives a very deep cause chain", () => {
+  test("stops walking a deep cause chain", () => {
     let err = new Error("leaf") as Error & { cause?: unknown }
-    for (let i = 0; i < 100_000; i++) {
+    // Ten: the walk caps at depth 4, so a larger number would only look
+    // significant.
+    for (let i = 0; i < 10; i++) {
       err = Object.assign(new Error(`w${i}`), { cause: err })
     }
     expect(isTlsTrustError(err)).toBe(false)

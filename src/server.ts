@@ -7,7 +7,7 @@ import {
   copilotRequestHeaders,
   isMockMode,
 } from "./api"
-import { TLS_HINT, isTlsTrustError } from "./tls"
+import { isTlsTrustError, tlsHint } from "./tls"
 import {
   getCopilotToken,
   invalidateCopilotToken,
@@ -495,7 +495,7 @@ async function handleMessages(
     return anthropicError(
       502,
       `upstream request failed: ${detail}` +
-        (isTlsTrustError(err) ? TLS_HINT : ""),
+        (isTlsTrustError(err) ? tlsHint() : ""),
     )
   }
   if (!result.ok) {

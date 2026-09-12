@@ -5,12 +5,16 @@
 // trusted here, and a failure surfaces to the user as an adapter 502 rendered
 // inside claude's UI rather than as a TLS error from claude itself.
 //
-// We pass the bundle per request via Bun's `tls.ca` instead of using
-// NODE_EXTRA_CA_CERTS, because this UNIONS with the default trust store
-// rather than replacing it. NODE_EXTRA_CA_CERTS has been reported to supplant
-// the system store on macOS and break trust that previously worked; and
-// NODE_USE_SYSTEM_CA is a no-op on Bun, whose default set already merges the
-// bundled and system roots.
+// We pass the bundle per request via Bun's `tls.ca`, which unions with the
+// default trust store rather than replacing it, and needs nothing decided
+// before the process starts. NODE_USE_SYSTEM_CA is a no-op on Bun, whose
+// default set already merges the bundled and system roots.
+//
+// NODE_EXTRA_CA_CERTS is reported to REPLACE the system store rather than add
+// to it on some builds. That did not reproduce here - measured on bun 1.3.14
+// and node 24, adding a private CA left registry.npmjs.org validating - so it
+// is stated as an unconfirmed report rather than as fact. clco uses it for the
+// MCP child, which has no per-request hook, and `tls.ca` for itself.
 
 import { readFileSync } from "node:fs"
 import { homedir } from "node:os"
@@ -33,7 +37,9 @@ export function caPaths(raw = process.env.CLCO_CA_BUNDLE): string[] {
   return (raw ?? "")
     .split(":")
     .map((path) => path.trim())
-    .filter(Boolean)
+    // A bare "~" is the home DIRECTORY, which readFileSync then reports as
+    // EISDIR - a confusing line for a value that can never be a certificate.
+    .filter((path) => path !== "" && path !== "~")
     .map((path) =>
       path === "~" || path.startsWith("~/")
         ? join(homedir(), path.slice(1))
@@ -42,6 +48,7 @@ export function caPaths(raw = process.env.CLCO_CA_BUNDLE): string[] {
 }
 
 let resolved: string[] | null | undefined
+let readablePath: string | undefined
 
 /**
  * The default trust store plus any CA named by CLCO_CA_BUNDLE (one path, or
@@ -59,6 +66,7 @@ export function caBundle(): string[] | undefined {
   for (const path of paths) {
     try {
       extra.push(readFileSync(path, "utf8"))
+      readablePath ??= path
     } catch (err) {
       console.error(
         `[clco] could not read CA bundle: ${path} (${err instanceof Error ? err.message : String(err)})`,
@@ -80,9 +88,23 @@ export function caBundle(): string[] | undefined {
   return resolved
 }
 
+/**
+ * The first CLCO_CA_BUNDLE path that actually read, for handing to a child
+ * process that can only take one.
+ *
+ * "First that read", not "first listed": clco used to log ENOENT for a path
+ * and then forward that same path to the MCP server anyway, where bun's only
+ * complaint is a warning on a stderr claude's UI does not show.
+ */
+export function caChildPath(): string | undefined {
+  caBundle()
+  return readablePath
+}
+
 /** Test seam: forget a cached bundle so a changed env is picked up. */
 export function resetCaBundle(): void {
   resolved = undefined
+  readablePath = undefined
 }
 
 /**
@@ -96,6 +118,29 @@ export function resetCaBundle(): void {
  * reported as an unreachable host, sending the user to their firewall team
  * instead of to their CA.
  */
+/**
+ * Codes where the chain and the name are fine but the clock is not. No CA
+ * bundle fixes these, so they are not trust failures - but the host answered,
+ * so they are not "cannot reach" either, which is how an expired MITM
+ * certificate used to send the user to their firewall team.
+ */
+const VALIDITY_CODES = new Set(["CERT_HAS_EXPIRED", "CERT_NOT_YET_VALID"])
+
+/** Whether a failure is an expired or not-yet-valid certificate. */
+export function isCertValidityError(err: unknown): boolean {
+  if (typeof err === "object" && err !== null) {
+    const code = (err as { code?: unknown }).code
+    if (typeof code === "string" && VALIDITY_CODES.has(code)) return true
+  }
+  const message = typeof err === "string" ? err : String((err as Error)?.message ?? err)
+  // The message path matters as much as the code: server.ts classifies a
+  // stringified upstream detail, so a code-only check would leave the new
+  // wording unreachable there.
+  return /certificate has expired|certificate is not yet valid|\bCERT_(HAS_EXPIRED|NOT_YET_VALID)\b/i.test(
+    message,
+  )
+}
+
 const TRUST_CODES = new Set([
   "DEPTH_ZERO_SELF_SIGNED_CERT",
   "SELF_SIGNED_CERT_IN_CHAIN",
@@ -115,7 +160,14 @@ const TRUST_CODES = new Set([
  * Accepts the thrown error (preferred - it carries `code`) or just a message,
  * since some call sites only have the string.
  */
-export function isTlsTrustError(err: unknown, depth = 0): boolean {
+export function isTlsTrustError(err: unknown): boolean {
+  // The depth budget is deliberately not a public parameter: as a second
+  // argument, `msgs.some(isTlsTrustError)` fed it the array index and silently
+  // disabled the cause walk from index 4 on.
+  return trustError(err, 0)
+}
+
+function trustError(err: unknown, depth: number): boolean {
   if (typeof err === "object" && err !== null) {
     const code = (err as { code?: unknown }).code
     if (typeof code === "string" && TRUST_CODES.has(code)) return true
@@ -124,7 +176,7 @@ export function isTlsTrustError(err: unknown, depth = 0): boolean {
     // was about to render a 502 or print the user's real error.
     if (depth < 4) {
       const cause = (err as { cause?: unknown }).cause
-      if (cause !== undefined && cause !== err && isTlsTrustError(cause, depth + 1)) {
+      if (cause !== undefined && cause !== err && trustError(cause, depth + 1)) {
         return true
       }
       // undici reports a multi-address failure as an AggregateError, so the
@@ -132,7 +184,7 @@ export function isTlsTrustError(err: unknown, depth = 0): boolean {
       const nested = (err as { errors?: unknown }).errors
       if (Array.isArray(nested)) {
         for (const one of nested) {
-          if (one !== err && isTlsTrustError(one, depth + 1)) return true
+          if (one !== err && trustError(one, depth + 1)) return true
         }
       }
     }
@@ -153,15 +205,30 @@ export function isTlsTrustError(err: unknown, depth = 0): boolean {
   )
 }
 
-// Ordered by what is actually verified to work on Bun. NODE_USE_SYSTEM_CA
-// used to lead this list and does nothing.
-export const TLS_HINT =
-  "\nThis looks like a corporate proxy re-signing TLS. To fix it:\n" +
-  "  1) Get your company CA as a file, then:\n" +
-  "       CLCO_CA_BUNDLE=/path/ca.pem clco ...\n" +
-  "     It is ADDED to the OS trust store, never replaces it.\n" +
-  '  2) Export it from the macOS keychain:\n' +
-  '       security find-certificate -a -p -c "<CA name>" > ca.pem\n' +
-  "  3) NODE_EXTRA_CA_CERTS has been reported to REPLACE the system store on\n" +
-  "     macOS and break trust that already worked - use it only if 1) fails.\n" +
-  "Never disable TLS verification: your GitHub token goes over that connection."
+/**
+ * What to tell the user about a trust failure.
+ *
+ * Adapts to whether a bundle actually loaded: telling someone who already
+ * exported a CA to export a CA is the advice this message exists to replace,
+ * and the one-line browser status already got this right.
+ */
+export function tlsHint(caLoaded = caBundle() !== undefined): string {
+  if (caLoaded) {
+    return (
+      "\nYour CLCO_CA_BUNDLE loaded, but nothing in it signed this chain.\n" +
+      "  - Export the ISSUING CA, not the leaf certificate the proxy presents.\n" +
+      '  - macOS: security find-certificate -a -p -c "<CA name>" > ca.pem\n' +
+      "  - Several CAs can be joined with \":\" - clco unions them all.\n" +
+      "Never disable TLS verification: your GitHub token goes over that connection."
+    )
+  }
+  return (
+    "\nThis looks like a corporate proxy re-signing TLS. To fix it:\n" +
+    "  1) Get your company CA as a file, then:\n" +
+    "       CLCO_CA_BUNDLE=/path/ca.pem clco ...\n" +
+    "     It is ADDED to the OS trust store, never replaces it.\n" +
+    '  2) Export it from the macOS keychain:\n' +
+    '       security find-certificate -a -p -c "<CA name>" > ca.pem\n' +
+    "Never disable TLS verification: your GitHub token goes over that connection."
+  )
+}

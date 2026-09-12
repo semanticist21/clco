@@ -14,7 +14,13 @@
 
 import { readdir } from "node:fs/promises"
 import { copilotFetch } from "./api"
-import { caBundle, caPaths, isTlsTrustError } from "./tls"
+import {
+  caBundle,
+  caChildPath,
+  caPaths,
+  isCertValidityError,
+  isTlsTrustError,
+} from "./tls"
 import { homedir, platform } from "node:os"
 import { join } from "node:path"
 
@@ -44,17 +50,23 @@ export function mcpPackage(): string {
 }
 
 /**
- * Whether the configured spec still comes from npmjs, i.e. whether probing
- * registry.npmjs.org says anything about it.
+ * Whether probing registry.npmjs.org says anything about the configured spec.
  *
- * Compares the package NAME, not the whole spec. CLCO_MCP_PACKAGE has three
- * documented uses and two of them - pinning a version and rolling back past a
- * bad release - leave the registry exactly where it was, so keying this on the
+ * Compares the package NAME, not the whole spec: two of CLCO_MCP_PACKAGE's
+ * three documented uses - pinning a version and rolling back past a bad
+ * release - leave the registry exactly where it was, so keying this on the
  * full spec switched the check off for a corporate user who had merely pinned.
+ * A file:/link: version needs no registry at all, so it counts as neither.
  */
 export function probesDefaultRegistry(pkg = mcpPackage()): boolean {
-  const name = (spec: string) => spec.slice(0, spec.lastIndexOf("@")) || spec
-  return name(pkg) === name(MCP_PACKAGE)
+  const at = pkg.lastIndexOf("@")
+  // at > 0, not >= 0: lastIndexOf returns -1 for a spec with no "@" and
+  // slice(0, -1) then quietly drops the last character ("playwright-mcp" ->
+  // "playwright-mc"), and index 0 is a scope marker, not a version separator.
+  const name = at > 0 ? pkg.slice(0, at) : pkg
+  const version = at > 0 ? pkg.slice(at + 1) : ""
+  if (version.includes(":") || version.includes("/")) return false
+  return name === MCP_PACKAGE.slice(0, MCP_PACKAGE.lastIndexOf("@"))
 }
 /** Set by the extension; with it the bridge attaches without a dialog. */
 export const TOKEN_ENV = "PLAYWRIGHT_MCP_EXTENSION_TOKEN"
@@ -144,12 +156,16 @@ export function browserMcpConfig(
   // otherwise browser control is the one feature that still breaks on the
   // network clco was hardened for.
   //
-  // Only the first path. CLCO_CA_BUNDLE takes several separated by ":" and
-  // clco unions them in-process, but NODE_EXTRA_CA_CERTS names a single file -
-  // so forwarding the raw value made clco's own probe pass while the child
-  // still could not fetch. caPaths() is the shared parser, so the absolute
-  // path the child gets is the one clco read for itself.
-  const first = caBundleValue === null ? undefined : caPaths(caBundleValue)[0]
+  // One path, and one clco actually read: NODE_EXTRA_CA_CERTS names a single
+  // file while CLCO_CA_BUNDLE takes several, and forwarding a path clco had
+  // already logged as unreadable left the child with nothing but a warning on
+  // a stderr claude's UI does not show.
+  const first =
+    caBundleValue === null
+      ? undefined
+      : caBundleValue === process.env.CLCO_CA_BUNDLE
+        ? caChildPath()
+        : caPaths(caBundleValue)[0]
   if (first) env.NODE_EXTRA_CA_CERTS = first
   // The extension token deliberately does NOT go here. This object becomes an
   // --mcp-config argv element, and argv is readable by other local users, so
@@ -198,7 +214,7 @@ export function parseToken(input: string): string | null | undefined {
 }
 
 /** Why browser control will or will not work, in the words the user needs. */
-export type RegistryStatus = "ok" | "tls" | "blocked" | "slow"
+export type RegistryStatus = "ok" | "tls" | "expired" | "blocked" | "slow"
 
 /**
  * Whether the registry can actually be reached, and if not, why.
@@ -230,6 +246,11 @@ export async function registryStatus(
     return res.ok ? "ok" : "blocked"
   } catch (err) {
     if (isTlsTrustError(err)) return "tls"
+    // The host answered and the chain may be fine; the dates are not. No CA
+    // fixes that, so it is not "tls" - but it is not "cannot reach" either,
+    // which is how a lapsed proxy certificate sent the user to their firewall
+    // team.
+    if (isCertValidityError(err)) return "expired"
     // A 2.5s budget is clco's alone - the bunx inside claude has none - so a
     // slow proxy must not be reported as a verdict that tools will not appear.
     if ((err as Error)?.name === "TimeoutError") return "slow"
@@ -267,49 +288,42 @@ export function startupLine(
   if (registered === false) {
     return "! browser: skipped - your own --mcp-config takes over"
   }
-  if (registry === "tls") {
-    return (
-      "! browser: TLS rejected by registry.npmjs.org - browser tools will not" +
-      " appear." +
-      // Telling someone to set a variable they already set is the advice this
-      // line exists to avoid giving. Keyed on whether a bundle LOADED, not on
-      // whether the variable is set: an unreadable path leaves it set and
-      // loads nothing, and "does not cover this chain" would then be a
-      // confident misdiagnosis pointing away from the real fix. caBundle()
-      // logs the read failure itself.
-      (caLoaded
-        ? " Your CLCO_CA_BUNDLE does not cover this chain."
-        : " Set CLCO_CA_BUNDLE to your company CA.")
-    )
-  }
-  if (registry === "blocked") {
-    return (
-      "! browser: cannot reach registry.npmjs.org - browser tools will not appear"
-    )
-  }
-  if (registry === "slow") {
-    // No number: the budget is clco's own and the bunx inside claude has none,
-    // so quoting it invites the reader to treat it as the threshold that
-    // matters.
-    return (
-      "! browser: registry.npmjs.org is slow to answer - browser tools may be" +
-      " slow to appear"
-    )
+  // Exhaustive by construction: a new RegistryStatus that nobody handles used
+  // to fall through to the success line, i.e. silent success for a failure.
+  if (registry !== undefined && registry !== "ok") {
+    const line: Record<Exclude<RegistryStatus, "ok">, string> = {
+      tls:
+        "TLS rejected by registry.npmjs.org - browser tools will not appear." +
+        // Telling someone to set a variable they already set is the advice
+        // this line exists to avoid giving. Keyed on whether a bundle LOADED,
+        // not on whether the variable is set.
+        (caLoaded
+          ? " Your CLCO_CA_BUNDLE does not cover this chain."
+          : " Set CLCO_CA_BUNDLE to your company CA."),
+      expired:
+        "registry.npmjs.org presented an expired certificate - browser tools" +
+        " will not appear. No CA file fixes this; check the proxy, or your clock.",
+      blocked: "cannot reach registry.npmjs.org - browser tools will not appear",
+      // No number: the budget is clco's own and the bunx inside claude has none.
+      slow: "registry.npmjs.org is slow to answer - browser tools may be slow to appear",
+    }
+    return `! browser: ${line[registry]}`
   }
   // Name the exact spec: it is user-overridable, it is what runs, and after a
   // bad upstream release "which version did that session run?" has to be
   // answerable from something.
   //
-  // And say when nothing was checked. The probe only knows registry.npmjs.org,
-  // so a spec pointing somewhere else is not probed at all - and a bare "+"
-  // there would assert a check that never ran, which is the same silent
-  // success the probe exists to prevent.
-  const unchecked = registry === undefined && !probesDefaultRegistry(pkg)
-  return (
-    `+ browser: ${pkg}` +
-    (unchecked ? " (registry not checked)" : "") +
-    (token ? "" : " (connect dialog each session)")
-  )
+  // And say when nothing was checked - a bare "+" would assert a check that
+  // never ran. "Not the default package" rather than "another registry":
+  // CLCO_MCP_PACKAGE names a package, and which registry serves it lives in
+  // .npmrc, so a fork published to npmjs is unprobed without being elsewhere.
+  const notes = [
+    registry === undefined && !probesDefaultRegistry(pkg)
+      ? "not the default package, so the registry check was skipped"
+      : null,
+    token ? null : "connect dialog each session",
+  ].filter(Boolean)
+  return `+ browser: ${pkg}${notes.length > 0 ? ` (${notes.join("; ")})` : ""}`
 }
 
 /**
