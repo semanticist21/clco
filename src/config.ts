@@ -85,8 +85,17 @@ async function openExclusive(path: string) {
   return open(path, "wx", 0o600)
 }
 
+/** Startup options answered once, changed with `clco setup`. */
+export interface SetupPrefs {
+  version: number
+  bypass: boolean
+  chrome: boolean
+  select: boolean
+}
+
 export interface Prefs {
   last_model?: string
+  setup?: SetupPrefs
 }
 
 function prefsPath(): string {

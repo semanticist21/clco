@@ -8,7 +8,7 @@ describe("parseArgs", () => {
     expect(parseArgs(["--chrome"])).toEqual({
       command: "run",
       port: undefined,
-      claudeArgs: ["--chrome"],
+      overrides: {}, claudeArgs: ["--chrome"],
     })
     expect(parseArgs(["-p", "hi"]).claudeArgs).toEqual(["-p", "hi"])
     expect(parseArgs(["--dangerously-skip-permissions"]).claudeArgs).toEqual([
@@ -23,7 +23,7 @@ describe("parseArgs", () => {
     expect(parseArgs(["--port", "4141", "--chrome"])).toEqual({
       command: "run",
       port: 4141,
-      claudeArgs: ["--chrome"],
+      overrides: {}, claudeArgs: ["--chrome"],
     })
   })
 
@@ -41,5 +41,25 @@ describe("parseArgs", () => {
       "--model",
       "luna-5.6",
     ])
+  })
+})
+
+describe("parseArgs — setup", () => {
+  test("recognises the setup command", () => {
+    expect(parseArgs(["setup"]).command).toBe("setup")
+  })
+
+  test("consumes --no-* instead of passing it to claude", () => {
+    const args = parseArgs(["--no-chrome", "--no-bypass"])
+    expect(args.overrides).toEqual({ chrome: false, bypass: false })
+    expect(args.claudeArgs).toEqual([])
+  })
+
+  // The first unknown dashed flag hands everything after it to claude, so the
+  // --no-* forms have to be consumed before that point.
+  test("keeps claude's own flags intact alongside --no-*", () => {
+    const args = parseArgs(["--no-chrome", "-p", "hi"])
+    expect(args.overrides).toEqual({ chrome: false })
+    expect(args.claudeArgs).toEqual(["-p", "hi"])
   })
 })

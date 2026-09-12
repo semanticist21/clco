@@ -25,6 +25,13 @@ import {
 import { setAdapterLogSink, startServer } from "./server"
 import { buildModelPickerFrom, resolveClaude, runClaude } from "./spawn"
 import { TLS_HINT, isTlsTrustError } from "./tls"
+import {
+  loadSetup,
+  runSetup,
+  setupClaudeArgs,
+  shouldSelectModel,
+  type SetupOverrides,
+} from "./setup"
 import { normalizeModel } from "./translate"
 
 const HELP = `clco — GitHub Copilot 구독으로 Claude Code 실행
@@ -56,8 +63,12 @@ const HELP = `clco — GitHub Copilot 구독으로 Claude Code 실행
 `
 
 interface Args {
-  command: "run" | "serve" | "auth" | "login" | "logout" | "update" | "status"
+  command:
+    | "run" | "serve" | "auth" | "login" | "logout" | "update" | "status"
+    | "setup"
   port?: number
+  /** Saved setup options turned off for this run via --no-*. */
+  overrides: SetupOverrides
   claudeArgs: string[]
 }
 
@@ -71,7 +82,11 @@ const COMMAND_LIST = `명령어:
   clco logout          저장된 토큰 삭제
   clco update          최신 버전으로 갱신
   clco status          계정·모델 권한·엔드포인트 확인
+  clco setup           시작 옵션(권한·chrome·모델선택) 기본값 설정
   clco --port N        어댑터 포트 고정
+  clco --no-bypass     이번 실행만 권한 확인 켜기
+  clco --no-chrome     이번 실행만 chrome 끄기
+  clco --no-select     이번 실행만 모델 선택 건너뛰기
   clco help            도움말
 
 claude 인자는 그대로 전달됩니다:  clco -p "질문"  /  clco --chrome  /  clco --dangerously-skip-permissions`
@@ -87,12 +102,14 @@ export function parseArgs(rawArgv: string[]): Args {
 
   let command: Args["command"] = "run"
   let port: number | undefined
+  const overrides: SetupOverrides = {}
   let i = 0
   while (i < leading.length) {
     const arg = leading[i]
     if (
       (arg === "serve" || arg === "auth" || arg === "login" ||
-        arg === "logout" || arg === "update" || arg === "status") &&
+        arg === "logout" || arg === "update" || arg === "status" ||
+        arg === "setup") &&
       command === "run"
     ) {
       command = arg
@@ -109,20 +126,27 @@ export function parseArgs(rawArgv: string[]): Args {
       i += 2
       continue
     }
+    // Turn a saved setup option off for this run. Consumed here so it never
+    // reaches claude, which has no --no-* form for any of these.
+    if (arg === "--no-bypass" || arg === "--no-chrome" || arg === "--no-select") {
+      overrides[arg.slice(5) as keyof SetupOverrides] = false
+      i++
+      continue
+    }
     if (arg === "__clco_passthrough__") {
-      return { command, port, claudeArgs: [...leading.slice(i + 1), ...trailing] }
+      return { command, port, overrides, claudeArgs: [...leading.slice(i + 1), ...trailing] }
     }
     // A dashed flag we don't own is claude's (--chrome, -p,
     // --dangerously-skip-permissions, ...). A bare word is almost always a
     // mistyped subcommand, so that still fails loudly.
     if (arg !== undefined && arg.startsWith("-")) {
-      return { command, port, claudeArgs: [...leading.slice(i), ...trailing] }
+      return { command, port, overrides, claudeArgs: [...leading.slice(i), ...trailing] }
     }
     throw new Error(
       `알 수 없는 명령: "${arg}"\n(claude 인자라면 -- 뒤에 넣으세요: clco -- ${leading.slice(i).join(" ")})\n\n${COMMAND_LIST}`,
     )
   }
-  return { command, port, claudeArgs: trailing }
+  return { command, port, overrides, claudeArgs: trailing }
 }
 
 const interactive = process.stdout.isTTY === true
@@ -351,9 +375,20 @@ async function main(): Promise<void> {
     return
   }
   const args = parseArgs(argv)
+  // Ask whenever a human is actually there. Print mode (-p) and non-TTY runs
+  // must stay unattended, but ordinary flags like --dangerously-skip-permissions
+  // or --chrome should not cost you the model choice.
+  const printMode = args.claudeArgs.some(
+    (a) => a === "-p" || a === "--print" || a.startsWith("--print="),
+  )
 
   if (args.command === "update") {
     await runUpdate()
+    return
+  }
+
+  if (args.command === "setup") {
+    await runSetup()
     return
   }
 
@@ -423,6 +458,19 @@ async function main(): Promise<void> {
     }
   })
 
+  let setup = await loadSetup()
+  if (!setup && args.command === "run") {
+    if (interactive && !printMode) {
+      setup = await runSetup()
+    } else {
+      // Never block an unattended run on a prompt; everything stays off,
+      // which is exactly how clco behaved before setup existed.
+      console.error(
+        "[clco] 초기 설정을 안 했습니다 — `clco setup`으로 기본값을 정하세요.",
+      )
+    }
+  }
+
   const models = await step("Copilot 토큰·모델 목록 조회", () =>
     discoverModels(),
   )
@@ -433,17 +481,12 @@ async function main(): Promise<void> {
   const list = upstreamModels()
 
   let defaultModel: string | undefined
-  // Ask whenever a human is actually there. Print mode (-p) and non-TTY runs
-  // must stay unattended, but ordinary flags like --dangerously-skip-permissions
-  // or --chrome should not cost you the model choice.
-  const printMode = args.claudeArgs.some(
-    (a) => a === "-p" || a === "--print" || a.startsWith("--print="),
-  )
   if (
     args.command === "run" &&
     !printMode &&
     interactive &&
     !process.env.CLCO_NO_SELECT &&
+    shouldSelectModel(setup, args.overrides) &&
     list.length > 0
   ) {
     const prefs = await loadPrefs()
@@ -513,7 +556,10 @@ async function main(): Promise<void> {
     baseUrl: server.url,
     models,
     defaultModel,
-    claudeArgs: args.claudeArgs,
+    claudeArgs: [
+      ...setupClaudeArgs(setup, args.overrides, args.claudeArgs),
+      ...args.claudeArgs,
+    ],
   })
   server.stop()
   process.exit(code)
