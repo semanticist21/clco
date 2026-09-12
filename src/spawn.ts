@@ -273,6 +273,8 @@ export async function runClaude(opts: {
   models: ModelMapping
   defaultModel?: string
   claudeArgs: string[]
+  /** Extra environment the saved setup implies (see setupEnv). */
+  extraEnv?: Record<string, string>
 }): Promise<number> {
   const claude = await resolveClaude()
   // Claude persists a /model pick into its config dir. Give it a private one
@@ -293,6 +295,7 @@ export async function runClaude(opts: {
   const childEnv: Record<string, string | undefined> = {
     ...process.env,
     ...env,
+    ...opts.extraEnv,
     ...(configDir ? { CLAUDE_CONFIG_DIR: configDir } : {}),
   }
   // Never let a parent-exported key override the adapter routing.

@@ -21,6 +21,8 @@ export const EXTENSION_NAME = "Playwright MCP Bridge"
 export const EXTENSION_URL =
   `https://chromewebstore.google.com/detail/playwright-extension/${EXTENSION_ID}`
 export const MCP_PACKAGE = "@playwright/mcp@latest"
+/** Set by the extension; with it the bridge attaches without a dialog. */
+export const TOKEN_ENV = "PLAYWRIGHT_MCP_EXTENSION_TOKEN"
 
 /**
  * Per-profile extension directories, by platform. Edge is included because
@@ -90,11 +92,24 @@ export function browserMcpConfig(installed: boolean): string | null {
   })
 }
 
-export function extensionHint(installed: boolean): string {
-  return installed
-    ? `${EXTENSION_NAME} detected - registering ${MCP_PACKAGE} --extension.\n` +
-        `Tools arrive as mcp__playwright__*. Click the extension to share a tab.`
-    : `Browser control needs the ${EXTENSION_NAME} extension, which only you\n` +
-        `can install:\n  ${EXTENSION_URL}\n` +
-        `Until then clco registers no browser server, so no tools appear.`
+export function extensionHint(installed: boolean, token?: string): string {
+  if (!installed) {
+    return (
+      `Browser control needs the ${EXTENSION_NAME} extension, which only you\n` +
+      `can install:\n  ${EXTENSION_URL}\n` +
+      `Until then clco registers no browser server, so no tools appear.`
+    )
+  }
+  // Whether a session is actually attached cannot be known here: the server
+  // starts per conversation and the extension connects to it afterwards. A
+  // stored token is the closest thing to a prediction, since it is exactly
+  // what removes the manual connect step.
+  return (
+    `${EXTENSION_NAME} detected - registering ${MCP_PACKAGE} --extension.\n` +
+    `Tools arrive as mcp__playwright__*.\n` +
+    (token
+      ? `Extension token stored, so sessions attach without the connect dialog.`
+      : `No extension token: each session shows the connect dialog. The\n` +
+        `extension offers a ${TOKEN_ENV} value - \`clco setup\` can store it.`)
+  )
 }

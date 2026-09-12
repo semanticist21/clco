@@ -4,6 +4,7 @@
 
 import * as p from "@clack/prompts"
 import {
+  TOKEN_ENV,
   browserMcpConfig,
   extensionHint,
   extensionInstalled,
@@ -61,9 +62,25 @@ export async function runSetup(): Promise<SetupPrefs> {
   }
 
   if (setup.browser) {
+    const installed = await extensionInstalled()
+    if (installed) {
+      // Offered rather than required: without it the session still attaches,
+      // just with a click each time.
+      const token = await p.text({
+        message:
+          `${TOKEN_ENV} (optional) - the extension shows one; storing it\n` +
+          "  skips the connect dialog every session. Enter to skip.",
+        placeholder: "leave empty to skip",
+        defaultValue: current.browserToken ?? "",
+      })
+      if (!p.isCancel(token)) {
+        const trimmed = String(token).trim()
+        if (trimmed) setup.browserToken = trimmed
+      }
+    }
     // Registering the server is only half an install; the extension is the
     // half only the user can add.
-    p.note(extensionHint(await extensionInstalled()), "Playwright MCP")
+    p.note(extensionHint(installed, setup.browserToken), "Playwright MCP")
   }
 
   await savePrefs({ ...prefs, setup })
@@ -131,6 +148,17 @@ export function setupClaudeArgs(
 }
 
 /** Whether to show the startup model picker for this run. */
+/** Environment the saved setup implies for the claude child. */
+export function setupEnv(
+  setup: SetupPrefs | null,
+  overrides: SetupOverrides,
+): Record<string, string> {
+  if (!setup?.browserToken || overrides.browser === false) return {}
+  // An exported value wins: it is the more immediate intent.
+  if (process.env[TOKEN_ENV]) return {}
+  return { [TOKEN_ENV]: setup.browserToken }
+}
+
 export function shouldSelectModel(
   setup: SetupPrefs | null,
   overrides: SetupOverrides,

@@ -5,7 +5,7 @@ import {
   extensionHint,
   extensionInstalled,
 } from "../src/browsermcp"
-import { setupClaudeArgs, shouldSelectModel } from "../src/setup"
+import { setupClaudeArgs, setupEnv, shouldSelectModel } from "../src/setup"
 
 const saved = (over: Partial<Record<string, boolean>> = {}) => ({
   version: 2,
@@ -110,5 +110,38 @@ describe("browser control", () => {
     expect(await extensionInstalled("/nonexistent-home")).toBe(false)
     expect(extensionHint(false)).toContain("chromewebstore.google.com")
     expect(extensionHint(true)).toContain("detected")
+  })
+})
+
+describe("extension token", () => {
+  const withToken = { ...saved({ browser: true }), browserToken: "tok123" }
+
+  test("is passed to the child so sessions skip the connect dialog", () => {
+    expect(setupEnv(withToken, {})).toEqual({
+      PLAYWRIGHT_MCP_EXTENSION_TOKEN: "tok123",
+    })
+  })
+
+  test("an exported value wins over the stored one", () => {
+    process.env.PLAYWRIGHT_MCP_EXTENSION_TOKEN = "from-shell"
+    try {
+      expect(setupEnv(withToken, {})).toEqual({})
+    } finally {
+      delete process.env.PLAYWRIGHT_MCP_EXTENSION_TOKEN
+    }
+  })
+
+  test("nothing to pass without a token, or with browser off for the run", () => {
+    expect(setupEnv(saved({ browser: true }), {})).toEqual({})
+    expect(setupEnv(withToken, { browser: false })).toEqual({})
+    expect(setupEnv(null, {})).toEqual({})
+  })
+
+  // Connection itself cannot be known at startup, so the hint reports the
+  // token instead - it is what decides whether a dialog appears.
+  test("the hint distinguishes stored token from none", () => {
+    expect(extensionHint(true, "tok")).toContain("without the connect dialog")
+    expect(extensionHint(true)).toContain("connect dialog")
+    expect(extensionHint(true)).toContain("PLAYWRIGHT_MCP_EXTENSION_TOKEN")
   })
 })

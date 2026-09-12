@@ -30,6 +30,7 @@ import {
   loadSetup,
   runSetup,
   setupClaudeArgs,
+  setupEnv,
   shouldSelectModel,
   type SetupOverrides,
 } from "./setup"
@@ -351,7 +352,9 @@ async function reportBrowserNotes(): Promise<void> {
   }
   const prefs = await loadPrefs().catch(() => ({}) as Awaited<ReturnType<typeof loadPrefs>>)
   if (prefs.setup?.browser) {
-    console.log("\n" + extensionHint(await extensionInstalled()))
+    console.log(
+      "\n" + extensionHint(await extensionInstalled(), prefs.setup?.browserToken),
+    )
   }
 }
 
@@ -596,6 +599,7 @@ async function main(): Promise<void> {
       ),
       ...args.claudeArgs,
     ],
+    extraEnv: setupEnv(setup, args.overrides),
   })
   server.stop()
   process.exit(code)

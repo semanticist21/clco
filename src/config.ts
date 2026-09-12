@@ -90,8 +90,14 @@ export interface SetupPrefs {
   version: number
   bypass: boolean
   select: boolean
-  /** Register the Browser MCP server for clco sessions. Added in v2. */
+  /** Register the Playwright MCP server for clco sessions. Added in v2. */
   browser?: boolean
+  /**
+   * Playwright MCP's extension token. Skips the connect dialog every session.
+   * Kept here because prefs.json is already written 0600, alongside no other
+   * secret — the GitHub token lives in auth.json.
+   */
+  browserToken?: string
 }
 
 export interface Prefs {
