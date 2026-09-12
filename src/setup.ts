@@ -53,7 +53,7 @@ export async function runSetup(): Promise<SetupPrefs> {
     // Claude's own Chrome integration cannot work here, so there is nothing to
     // ask about it — only an alternative to offer.
     browser: await ask(
-      "Claude's Chrome extension is disabled on a Copilot backend.\n" +
+      "Claude Chrome is not available in clco.\n" +
         "  Enable Playwright MCP for browser control instead?",
       current.browser ?? true,
     ),
