@@ -107,6 +107,24 @@ export function parseToken(input: string): string | undefined {
 }
 
 /**
+ * One line for the startup summary, alongside adapter and model. Whether a
+ * session is attached is not knowable here — the server starts per
+ * conversation — so this reports what clco did, and whether a connect dialog
+ * is coming.
+ */
+export function startupLine(
+  enabled: boolean,
+  installed: boolean,
+  token?: string,
+): string | null {
+  if (!enabled) return null
+  if (!installed) {
+    return `! browser: ${EXTENSION_NAME} not installed - ${EXTENSION_URL}`
+  }
+  return `+ browser: Playwright MCP${token ? "" : " (connect dialog each session)"}`
+}
+
+/**
  * What setup shows before asking anything: the state, without advice to run
  * the very command that is running.
  */

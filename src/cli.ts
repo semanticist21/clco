@@ -25,7 +25,11 @@ import {
 import { setAdapterLogSink, startServer } from "./server"
 import { buildModelPickerFrom, resolveClaude, runClaude } from "./spawn"
 import { TLS_HINT, isTlsTrustError } from "./tls"
-import { extensionHint, extensionInstalled } from "./browsermcp"
+import {
+  extensionHint,
+  extensionInstalled,
+  startupLine,
+} from "./browsermcp"
 import {
   loadSetup,
   runSetup,
@@ -580,6 +584,12 @@ async function main(): Promise<void> {
   console.error(
     `+ model: ${defaultModel ?? models.sonnet} (sonnet=${models.sonnet} opus=${models.opus} haiku=${models.haiku})`,
   )
+  const browserLine = startupLine(
+    setup?.browser === true && args.overrides.browser !== false,
+    await extensionInstalled(),
+    setup?.browserToken,
+  )
+  if (browserLine) console.error(browserLine)
 
   if (args.command === "serve") {
     console.error("Adapter running... (Ctrl+C to stop)")

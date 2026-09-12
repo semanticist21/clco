@@ -5,6 +5,7 @@ import {
   extensionHint,
   extensionInstalled,
   parseToken,
+  startupLine,
 } from "../src/browsermcp"
 import { setupClaudeArgs, setupEnv, shouldSelectModel } from "../src/setup"
 
@@ -166,5 +167,19 @@ describe("token parsing", () => {
     expect(parseToken("")).toBeUndefined()
     expect(parseToken("   ")).toBeUndefined()
     expect(parseToken("PLAYWRIGHT_MCP_EXTENSION_TOKEN=")).toBeUndefined()
+  })
+})
+
+describe("startup line", () => {
+  test("reports what clco did, and whether a dialog is coming", () => {
+    expect(startupLine(true, true, "tok")).toBe("+ browser: Playwright MCP")
+    expect(startupLine(true, true)).toContain("connect dialog each session")
+    expect(startupLine(true, false)).toContain("not installed")
+    expect(startupLine(true, false)).toContain("chromewebstore.google.com")
+  })
+
+  // Nothing to say when browser control is off, or off for this run.
+  test("stays quiet when the feature is not in play", () => {
+    expect(startupLine(false, true, "tok")).toBeNull()
   })
 })
