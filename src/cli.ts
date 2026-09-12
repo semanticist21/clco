@@ -26,8 +26,10 @@ import { setAdapterLogSink, startServer } from "./server"
 import { buildModelPickerFrom, resolveClaude, runClaude } from "./spawn"
 import { TLS_HINT, isTlsTrustError } from "./tls"
 import {
+  MCP_PACKAGE,
   extensionHint,
   extensionInstalled,
+  mcpPackage,
   parseToken,
   registryStatus,
   startupLine,
@@ -587,9 +589,7 @@ async function main(): Promise<void> {
   const list = upstreamModels()
 
   let defaultModel: string | undefined
-  const prefs = await loadPrefs().catch(
-    () => ({}) as Awaited<ReturnType<typeof loadPrefs>>,
-  )
+  const prefs = await loadPrefs()
   // Offer exactly what /model will: the raw upstream list also carries
   // embeddings and Copilot's internal plumbing, which cannot hold a
   // conversation at all, and repeats display names across several slugs.
@@ -635,7 +635,7 @@ async function main(): Promise<void> {
     } catch {
       console.error("[clco] ! could not save the model choice (check permissions on the config directory)")
     }
-  } else if (list.length > 0) {
+  } else {
     defaultModel = modelWithoutPrompt(remembered, offered, models.sonnet)
   }
 
@@ -657,7 +657,7 @@ async function main(): Promise<void> {
   }
   console.error(`+ adapter: ${server.url}`)
   console.error(
-    `+ model: ${defaultModel ?? models.sonnet} (sonnet=${models.sonnet} opus=${models.opus} haiku=${models.haiku})`,
+    `+ model: ${defaultModel ?? "(claude default)"} (sonnet=${models.sonnet} opus=${models.opus} haiku=${models.haiku})`,
   )
   const browserEnabled =
     setup?.browser === true && args.overrides.browser !== false
@@ -677,8 +677,12 @@ async function main(): Promise<void> {
     browserExtension,
     setup?.browserToken,
     undefined,
-    // Only worth asking when everything else is in place.
-    browserExtension && registered ? await registryStatus() : undefined,
+    // Only worth asking when everything else is in place - and only about the
+    // default spec, since the probe hits registry.npmjs.org and can say
+    // nothing true about an internal mirror named by CLCO_MCP_PACKAGE.
+    browserExtension && registered && mcpPackage() === MCP_PACKAGE
+      ? await registryStatus()
+      : undefined,
     browserEnabled && browserExtension ? registered : undefined,
   )
   if (browserLine) console.error(browserLine)
@@ -704,7 +708,7 @@ if (import.meta.main) {
   main().catch((err) => {
     const message = err instanceof Error ? err.message : String(err)
     console.error(
-      `Error: ${message}${isTlsTrustError(message) ? TLS_HINT : ""}`,
+      `Error: ${message}${isTlsTrustError(err) ? TLS_HINT : ""}`,
     )
     process.exit(1)
   })

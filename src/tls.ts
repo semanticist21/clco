@@ -59,8 +59,43 @@ export function resetCaBundle(): void {
   resolved = undefined
 }
 
-export function isTlsTrustError(message: string): boolean {
-  return /self[- ]signed certificate|unable to (get|verify) local issuer|CERT_|certificate chain/i.test(
+/**
+ * OpenSSL verify codes that mean "I do not trust this chain" - which is what a
+ * TLS-inspecting proxy produces, and what CLCO_CA_BUNDLE fixes. Bun populates
+ * `code` on the thrown error, so this is the reliable discriminator; the
+ * message text is not. Matching on text alone missed
+ * UNABLE_TO_VERIFY_LEAF_SIGNATURE, whose message is "unable to verify the
+ * first certificate" - a proxy presenting a leaf without shipping its
+ * intermediate, i.e. the most ordinary corporate shape there is. It was
+ * reported as an unreachable host, sending the user to their firewall team
+ * instead of to their CA.
+ */
+const TRUST_CODES = new Set([
+  "DEPTH_ZERO_SELF_SIGNED_CERT",
+  "SELF_SIGNED_CERT_IN_CHAIN",
+  "UNABLE_TO_VERIFY_LEAF_SIGNATURE",
+  "UNABLE_TO_GET_ISSUER_CERT",
+  "UNABLE_TO_GET_ISSUER_CERT_LOCALLY",
+  "CERT_UNTRUSTED",
+  "ERR_TLS_CERT_ALTNAME_INVALID",
+])
+
+/**
+ * Whether a failure is a broken trust chain rather than an unreachable host.
+ *
+ * Accepts the thrown error (preferred - it carries `code`) or just a message,
+ * since some call sites only have the string.
+ */
+export function isTlsTrustError(err: unknown): boolean {
+  if (typeof err === "object" && err !== null) {
+    const code = (err as { code?: unknown }).code
+    if (typeof code === "string" && TRUST_CODES.has(code)) return true
+    const cause = (err as { cause?: unknown }).cause
+    if (cause !== undefined && cause !== err && isTlsTrustError(cause)) return true
+  }
+  const message = typeof err === "string" ? err : String((err as Error)?.message ?? err)
+  // Fallback for a stringified error, or a Bun/Node build that omits the code.
+  return /self[- ]signed certificate|unable to (get|verify) (local issuer|the first certificate)|unable to get issuer certificate|CERT_|certificate chain/i.test(
     message,
   )
 }

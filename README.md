@@ -47,7 +47,7 @@ clco
    |---|---|---|
    | Run without permission prompts? | **Yes** | Passes `--dangerously-skip-permissions`, so claude edits files and runs commands without asking. `clco --no-bypass` for one session. |
    | Enable Playwright MCP for browser control? | **Yes** | Registers the Playwright MCP server for clco sessions only. Needs an extension — see [Browser control](#browser-control). `clco --no-browser` for one session. |
-   | Pick a model each time clco starts? | **Yes** | Shows the model prompt at launch. `clco --no-select` for one session. |
+   | Pick a model each time clco starts? | **Yes** | Shows the model prompt at launch. Answering No reuses your last pick. `clco --no-select` for one session. |
 
 3. **Pick a model**, then claude starts. Switch mid-session with `/model`.
 

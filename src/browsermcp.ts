@@ -16,7 +16,7 @@ import { readdir } from "node:fs/promises"
 import { copilotFetch } from "./api"
 import { isTlsTrustError } from "./tls"
 import { homedir, platform } from "node:os"
-import { join } from "node:path"
+import { join, resolve } from "node:path"
 
 export const EXTENSION_ID = "mmlmfjhmonkocbjadbfplnigmagldckm"
 export const EXTENSION_NAME = "Playwright MCP Bridge"
@@ -24,7 +24,7 @@ export const EXTENSION_URL =
   `https://chromewebstore.google.com/detail/playwright-extension/${EXTENSION_ID}`
 // @latest. The server half is fetched from npm each session, and the extension
 // half auto-updates from the Web Store and cannot be pinned alongside it, so
-// pinning the server only guarantees the two drift apart. Pinning also does not
+// pinning the server lets the two drift. Pinning also does not
 // make browser control work offline - the registry is consulted either way on
 // any machine that has not just run that exact version.
 //
@@ -128,7 +128,15 @@ export function browserMcpConfig(
   // copilotFetch, so a corporate CA has to be handed down explicitly -
   // otherwise browser control is the one feature that still breaks on the
   // network clco was hardened for.
-  if (caBundlePath) env.NODE_EXTRA_CA_CERTS = caBundlePath
+  //
+  // Only the first path, made absolute. CLCO_CA_BUNDLE takes several paths
+  // separated by ":" and clco unions them in-process, but NODE_EXTRA_CA_CERTS
+  // names a single file - so forwarding the raw value made clco's own probe
+  // pass while the child still could not fetch, which is the silent failure
+  // the startup line exists to prevent. Absolute because this resolves against
+  // the child's cwd, not clco's.
+  const first = caBundlePath?.split(":").find(Boolean)
+  if (first) env.NODE_EXTRA_CA_CERTS = resolve(first)
   // The extension token deliberately does NOT go here. This object becomes an
   // --mcp-config argv element, and argv is readable by other local users, so
   // naming the token here published it. It reaches the server through claude's
@@ -176,7 +184,7 @@ export function parseToken(input: string): string | null | undefined {
 }
 
 /** Why browser control will or will not work, in the words the user needs. */
-export type RegistryStatus = "ok" | "tls" | "blocked"
+export type RegistryStatus = "ok" | "tls" | "blocked" | "slow"
 
 /**
  * Whether the registry can actually be reached, and if not, why.
@@ -192,19 +200,26 @@ export type RegistryStatus = "ok" | "tls" | "blocked"
  * things from the user - one needs their company CA, the other cannot be fixed
  * from here at all.
  */
-export async function registryStatus(timeoutMs = 2500): Promise<RegistryStatus> {
+export async function registryStatus(
+  timeoutMs = 2500,
+  /** Overridden in tests; the probe has no other way to reach a TLS failure. */
+  url = "https://registry.npmjs.org/@playwright/mcp",
+): Promise<RegistryStatus> {
   try {
     // copilotFetch, so a corporate CA applies here exactly as it does to the
     // Copilot calls - otherwise this would report "blocked" on the very
     // networks the CA support exists for.
-    const res = await copilotFetch(
-      "https://registry.npmjs.org/@playwright/mcp",
-      { method: "HEAD", signal: AbortSignal.timeout(timeoutMs) },
-    )
+    const res = await copilotFetch(url, {
+      method: "HEAD",
+      signal: AbortSignal.timeout(timeoutMs),
+    })
     return res.ok ? "ok" : "blocked"
   } catch (err) {
-    const message = err instanceof Error ? err.message : String(err)
-    return isTlsTrustError(message) ? "tls" : "blocked"
+    if (isTlsTrustError(err)) return "tls"
+    // A 2.5s budget is clco's alone - the bunx inside claude has none - so a
+    // slow proxy must not be reported as a verdict that tools will not appear.
+    if ((err as Error)?.name === "TimeoutError") return "slow"
+    return "blocked"
   }
 }
 
@@ -238,15 +253,24 @@ export function startupLine(
   }
   if (registry === "tls") {
     return (
-      `! browser: TLS rejected by registry.npmjs.org - ${pkg} is fetched at` +
-      " session start, so browser tools will not appear." +
-      " Set CLCO_CA_BUNDLE to your company CA."
+      "! browser: TLS rejected by registry.npmjs.org - browser tools will not" +
+      " appear." +
+      // Telling someone to set a variable they already set is the advice this
+      // line exists to avoid giving.
+      (process.env.CLCO_CA_BUNDLE
+        ? " Your CLCO_CA_BUNDLE does not cover this chain."
+        : " Set CLCO_CA_BUNDLE to your company CA.")
     )
   }
   if (registry === "blocked") {
     return (
-      `! browser: cannot reach registry.npmjs.org - ${pkg} is fetched at` +
-      " session start, so browser tools will not appear"
+      "! browser: cannot reach registry.npmjs.org - browser tools will not appear"
+    )
+  }
+  if (registry === "slow") {
+    return (
+      "! browser: registry.npmjs.org did not answer in 2.5s - browser tools may" +
+      " be slow to appear"
     )
   }
   // Name the exact spec: it is user-overridable, it is what runs, and after a

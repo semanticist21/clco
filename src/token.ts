@@ -274,7 +274,7 @@ export async function discoverModels(): Promise<ModelMapping> {
     // A broken trust chain is not a "carry on with fallback slugs" situation
     // — it is the user's actual blocker, and every later request will fail
     // the same way. Let it reach main().catch so the TLS hint gets printed.
-    if (isTlsTrustError(reason)) throw err
+    if (isTlsTrustError(err)) throw err
   }
   // Reported by the caller after any progress spinner has stopped; printing
   // here would be painted over by the spinner that wraps this call.

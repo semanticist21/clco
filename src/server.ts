@@ -495,7 +495,7 @@ async function handleMessages(
     return anthropicError(
       502,
       `upstream request failed: ${detail}` +
-        (isTlsTrustError(detail) ? TLS_HINT : ""),
+        (isTlsTrustError(err) ? TLS_HINT : ""),
     )
   }
   if (!result.ok) {

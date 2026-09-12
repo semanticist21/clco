@@ -183,23 +183,28 @@ export function setupEnv(
 }
 
 /**
- * Which model a session runs when the startup prompt is skipped.
+ * Which model a session runs when the startup prompt is skipped, or undefined
+ * to pass no --model and leave claude on its own default.
  *
  * Turning the prompt off means "stop asking me", not "forget what I picked", so
- * the remembered choice is reused when the account still offers it. Falling
- * through to undefined passed no --model at all, which left claude on its own
- * built-in default - whichever model it ships as newest - so answering no to
- * the setup question silently reset every launch to Fable while clco's startup
- * line claimed the sonnet slug. An explicit `clco --model X` still wins: it
+ * the remembered choice is reused. An explicit `clco --model X` still wins: it
  * reaches claude through claudeArgs and runClaude stands aside when it sees one.
+ *
+ * Both candidates are checked against what the account actually serves. The
+ * fallback needs it as much as the remembered pick does: discoverModels caches
+ * the model list BEFORE deciding it found no claude-sonnet slug, so a plan
+ * without Claude models yields a non-empty list and a sonnet slot that is only
+ * a default guess. Asserting that as --model would fail a session that used to
+ * work by passing nothing at all.
  */
 export function modelWithoutPrompt(
   remembered: string | undefined,
   /** Slugs the account currently offers, as the picker would list them. */
   offered: ReadonlyArray<string>,
   fallback: string,
-): string {
-  return remembered && offered.includes(remembered) ? remembered : fallback
+): string | undefined {
+  if (remembered && offered.includes(remembered)) return remembered
+  return offered.includes(fallback) ? fallback : undefined
 }
 
 /** Whether to show the startup model picker for this run. */

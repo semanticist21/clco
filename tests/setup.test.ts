@@ -341,10 +341,15 @@ describe("registry reachability", () => {
     // reporting it as "unreachable" sends the user looking at their firewall.
     const tls = startupLine(true, true, "tok", true, "tls")!
     expect(tls).toContain("TLS rejected")
-    expect(tls).toContain("CLCO_CA_BUNDLE")
+    expect(tls).toContain("Set CLCO_CA_BUNDLE")
     expect(startupLine(true, true, "tok", true, "ok")).toBe(
       "+ browser: @playwright/mcp@latest",
     )
+    // A slow proxy is not a verdict: the bunx inside claude has no 2.5s
+    // budget, so predicting that tools "will not appear" would be wrong.
+    const slow = startupLine(true, true, "tok", true, "slow")!
+    expect(slow).toContain("did not answer in 2.5s")
+    expect(slow).toContain("may")
     // Not checked is not the same as unreachable.
     expect(startupLine(true, true, "tok", true, undefined)).toBe(
       "+ browser: @playwright/mcp@latest",
@@ -392,5 +397,59 @@ describe("model when the prompt is off", () => {
     expect(modelWithoutPrompt("kimi-k3", offered, "claude-sonnet-5")).toBe(
       "claude-sonnet-5",
     )
+  })
+
+  // discoverModels caches the model list before deciding it found no
+  // claude-sonnet slug, so a plan without Claude models reaches here with a
+  // non-empty list and a sonnet slot that is only a guess. Asserting that as
+  // --model would break a session that previously worked by passing nothing.
+  test("passes nothing when even the fallback is not served", () => {
+    expect(
+      modelWithoutPrompt(undefined, ["mock-chat"], "claude-sonnet-4.5"),
+    ).toBeUndefined()
+    expect(
+      modelWithoutPrompt("kimi-k3", ["mock-chat"], "claude-sonnet-4.5"),
+    ).toBeUndefined()
+    // Nothing offered at all is the same answer, not a crash.
+    expect(modelWithoutPrompt("kimi-k3", [], "claude-sonnet-5")).toBeUndefined()
+  })
+})
+
+// Telling someone to set a variable they already set is the advice this line
+// exists to avoid giving.
+describe("TLS advice adapts to what is already configured", () => {
+  test("names the configured bundle as insufficient instead", () => {
+    const before = process.env.CLCO_CA_BUNDLE
+    process.env.CLCO_CA_BUNDLE = "/tmp/ca.pem"
+    try {
+      const line = startupLine(true, true, "tok", true, "tls")!
+      expect(line).toContain("does not cover this chain")
+      expect(line).not.toContain("Set CLCO_CA_BUNDLE")
+    } finally {
+      if (before === undefined) delete process.env.CLCO_CA_BUNDLE
+      else process.env.CLCO_CA_BUNDLE = before
+    }
+  })
+})
+
+// CLCO_CA_BUNDLE takes several paths and clco unions them in-process, but
+// NODE_EXTRA_CA_CERTS names one file - so forwarding the raw value made clco's
+// own probe pass while the child still could not fetch.
+describe("CA bundle handed to the MCP child", () => {
+  const envOf = (config: string | null) =>
+    JSON.parse(config!).mcpServers.playwright.env
+
+  test("forwards a single absolute path", () => {
+    expect(envOf(browserMcpConfig(true, "/a/ca.pem:/b/ca.pem")).NODE_EXTRA_CA_CERTS)
+      .toBe("/a/ca.pem")
+    // Relative resolves against the child's cwd, not clco's.
+    expect(
+      envOf(browserMcpConfig(true, "ca.pem")).NODE_EXTRA_CA_CERTS,
+    ).toStartWith("/")
+  })
+
+  test("no CA means no env block at all", () => {
+    expect(JSON.parse(browserMcpConfig(true, undefined)!).mcpServers.playwright.env)
+      .toBeUndefined()
   })
 })
