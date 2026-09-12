@@ -20,6 +20,8 @@ const nativeCalls: Array<{
 }> = []
 
 const AUTH = { authorization: "Bearer clco-local" }
+/** Every upstream path the adapter actually hit, in order. */
+const upstreamPaths: string[] = []
 
 const chunkLine = (delta: unknown, finish: string | null = null) =>
   `data: ${JSON.stringify({
@@ -45,6 +47,7 @@ beforeAll(async () => {
     port: 0,
     fetch: async (req) => {
       const url = new URL(req.url)
+      upstreamPaths.push(url.pathname)
       if (url.pathname === "/responses") {
         const body = (await req.json()) as {
           stream?: boolean
@@ -147,6 +150,11 @@ beforeAll(async () => {
             {
               id: "mock-native-reject",
               supported_endpoints: ["/v1/messages", "/chat/completions"],
+            },
+            // The real GPT-5.x "luna" shape: Responses API only.
+            {
+              id: "mock-responses-only",
+              supported_endpoints: ["/responses"],
             },
           ],
         })
@@ -662,5 +670,25 @@ describe("sanitizeBeta", () => {
   test("leaves unrelated betas and absent headers alone", () => {
     expect(sanitizeBeta("some-beta", "mock-chat")).toBe("some-beta")
     expect(sanitizeBeta(undefined, "mock-chat")).toBeUndefined()
+  })
+})
+
+describe("dialect routing", () => {
+  test("a responses-only model is not probed on /chat/completions first", async () => {
+    upstreamPaths.length = 0
+    const res = await fetch(`${adapter.url}/v1/messages`, {
+      method: "POST",
+      headers: { ...AUTH, "content-type": "application/json" },
+      body: JSON.stringify({
+        model: "mock-responses-only",
+        max_tokens: 16,
+        messages: [{ role: "user", content: "hi" }],
+      }),
+    })
+    expect(res.status).toBe(200)
+    // /models declares this model as /responses-only, so guessing chat first
+    // would burn one upstream request per model — a real charge on a metered
+    // plan. The learned fallback still covers a wrong declaration.
+    expect(upstreamPaths).toEqual(["/responses"])
   })
 })

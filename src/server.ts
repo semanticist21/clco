@@ -153,6 +153,16 @@ function detectVision(payload: OpenAIRequest): boolean {
 // family etc.) — remembered after the first chat/completions rejection.
 const responsesOnlyModels = new Set<string>()
 
+/** True when /models says the model serves /responses but not chat. */
+function responsesOnly(model: string): boolean {
+  const endpoints = modelInfo(normalizeModel(model))?.endpoints
+  if (!endpoints || endpoints.length === 0) return false
+  return (
+    endpoints.includes("/responses") &&
+    !endpoints.includes("/chat/completions")
+  )
+}
+
 // Models whose native /v1/messages attempt was rejected — remembered so the
 // translation path is used directly from then on.
 const nativeRejectedModels = new Set<string>()
@@ -192,7 +202,13 @@ async function copilotChat(
     !process.env.CLCO_NO_PASSTHROUGH &&
     supportsNativeMessages(payload.model) &&
     !nativeRejectedModels.has(payload.model)
-  let useResponses = responsesOnlyModels.has(payload.model)
+  // Discovery already told us which endpoints this model serves, so honour
+  // that instead of probing /chat/completions and waiting to be rejected —
+  // that guess cost one wasted upstream request per model, which on a
+  // metered plan is a real charge. The learned set still overrides it, so a
+  // wrong or missing declaration recovers exactly as before.
+  let useResponses =
+    responsesOnlyModels.has(payload.model) || responsesOnly(payload.model)
   let attempt = 0
   while (attempt < 2) {
     const token = mockToken ? "mock" : await getCopilotToken(attempt > 0)
