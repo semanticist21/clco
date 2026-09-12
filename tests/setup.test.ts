@@ -10,7 +10,6 @@ import { setupClaudeArgs, shouldSelectModel } from "../src/setup"
 const saved = (over: Partial<Record<string, boolean>> = {}) => ({
   version: 2,
   bypass: true,
-  chrome: true,
   select: true,
   browser: false,
   ...over,
@@ -20,7 +19,6 @@ describe("setupClaudeArgs", () => {
   test("adds the flags the saved setup implies", () => {
     expect(setupClaudeArgs(saved(), {}, [])).toEqual([
       "--dangerously-skip-permissions",
-      "--chrome",
     ])
   })
 
@@ -29,24 +27,17 @@ describe("setupClaudeArgs", () => {
   })
 
   test("--no-* turns one option off for this run only", () => {
-    expect(setupClaudeArgs(saved(), { chrome: false }, [])).toEqual([
-      "--dangerously-skip-permissions",
-    ])
-    expect(setupClaudeArgs(saved(), { bypass: false, chrome: false }, [])).toEqual(
-      [],
-    )
+    expect(setupClaudeArgs(saved(), { bypass: false }, [])).toEqual([])
   })
 
   test("never duplicates a flag the user already passed", () => {
-    expect(setupClaudeArgs(saved(), {}, ["--chrome"])).toEqual([
-      "--dangerously-skip-permissions",
-    ])
+    expect(
+      setupClaudeArgs(saved(), {}, ["--dangerously-skip-permissions"]),
+    ).toEqual([])
   })
 
   test("an option saved off stays off", () => {
-    expect(setupClaudeArgs(saved({ chrome: false }), {}, [])).toEqual([
-      "--dangerously-skip-permissions",
-    ])
+    expect(setupClaudeArgs(saved({ bypass: false }), {}, [])).toEqual([])
   })
 })
 
@@ -72,7 +63,6 @@ describe("defaults", () => {
     const { SETUP_DEFAULTS } = await import("../src/setup")
     expect(SETUP_DEFAULTS).toEqual({
       bypass: true,
-      chrome: true,
       select: true,
       browser: true,
     })

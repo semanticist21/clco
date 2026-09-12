@@ -15,7 +15,6 @@ export const SETUP_VERSION = 2
 
 export interface SetupOverrides {
   bypass?: boolean
-  chrome?: boolean
   select?: boolean
   browser?: boolean
 }
@@ -27,7 +26,6 @@ export interface SetupOverrides {
 // asked for.
 export const SETUP_DEFAULTS: Omit<SetupPrefs, "version"> = {
   bypass: true,
-  chrome: true,
   select: true,
   browser: true,
 }
@@ -52,25 +50,27 @@ export async function runSetup(): Promise<SetupPrefs> {
       "Run without permission prompts? (--dangerously-skip-permissions)",
       current.bypass,
     ),
-    chrome: await ask(
-      "Pass --chrome? (the extension needs a claude.ai login, so it stays\n" +
-      "  disabled on a Copilot backend - a browser MCP server works instead)",
-      current.chrome,
-    ),
     select: await ask("Pick a model each time clco starts?", current.select),
+    // Claude's own Chrome integration cannot work here, so there is nothing to
+    // ask about it — only an alternative to offer.
     browser: await ask(
-      "Enable browser control (Playwright MCP) for the tab you share?",
+      "Claude's Chrome extension is disabled on a Copilot backend.\n" +
+        "  Enable Playwright MCP for browser control instead?",
       current.browser ?? true,
     ),
   }
 
   if (setup.browser) {
-    // The server is only half of it, and the half clco cannot install.
-    p.note(extensionHint(await extensionInstalled()), "Browser control")
+    // Registering the server is only half an install; the extension is the
+    // half only the user can add.
+    p.note(extensionHint(await extensionInstalled()), "Playwright MCP")
   }
 
   await savePrefs({ ...prefs, setup })
-  p.outro("Saved. Change it with `clco setup`; turn one off for a single run with --no-bypass / --no-chrome / --no-select")
+  p.outro(
+    "Saved. Re-run `clco setup` to change it, or turn one off for a single\n" +
+      "run with --no-bypass / --no-select / --no-browser.",
+  )
   return setup
 }
 
@@ -116,9 +116,6 @@ export function setupClaudeArgs(
     !has("--dangerously-skip-permissions")
   ) {
     out.push("--dangerously-skip-permissions")
-  }
-  if (setup.chrome && overrides.chrome !== false && !has("--chrome")) {
-    out.push("--chrome")
   }
   // Registered per session rather than written into the user's MCP config, so
   // clco never edits configuration that outlives it.

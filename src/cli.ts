@@ -87,7 +87,6 @@ const COMMAND_LIST = `Commands:
   clco setup           Set startup defaults (permissions, chrome, model prompt)
   clco --port N        Pin the adapter port
   clco --no-bypass     Re-enable permission prompts for this run
-  clco --no-chrome     Disable chrome for this run
   clco --no-select     Skip the model prompt for this run
   clco --no-browser    Skip the Browser MCP server for this run
   clco help            Show this help
@@ -133,7 +132,6 @@ export function parseArgs(rawArgv: string[]): Args {
     // reaches claude, which has no --no-* form for any of these.
     if (
       arg === "--no-bypass" ||
-      arg === "--no-chrome" ||
       arg === "--no-select" ||
       arg === "--no-browser"
     ) {
@@ -342,17 +340,16 @@ async function runStatus(): Promise<void> {
 // env-var and setup-token sessions default to user:inference only)". clco
 // authenticates with ANTHROPIC_AUTH_TOKEN against its own adapter, so it is
 // always an env-var session and the browser tools are never registered —
-// measured: mcp__claude-in-chrome__* appears in zero requests. Say so, rather
-// than letting --chrome look like it did something.
-async function reportChromeCaveat(): Promise<void> {
-  const prefs = await loadPrefs().catch(() => ({}) as Awaited<ReturnType<typeof loadPrefs>>)
-  if (prefs.setup?.chrome) {
+// measured: mcp__claude-in-chrome__* appears in zero requests. clco therefore
+// never passes --chrome itself; this only catches someone passing it by hand.
+async function reportBrowserNotes(): Promise<void> {
+  if (process.argv.includes("--chrome")) {
     console.log(
-      "\nNote: --chrome is on, but the Claude Chrome extension needs a claude.ai\n" +
-        "  login and stays disabled on a Copilot backend. Playwright MCP covers\n" +
-        "  the same ground here - `clco setup` enables it.",
+      "\nNote: --chrome cannot work here - the Claude Chrome extension needs a\n" +
+        "  claude.ai login, and clco is always an env-var session.",
     )
   }
+  const prefs = await loadPrefs().catch(() => ({}) as Awaited<ReturnType<typeof loadPrefs>>)
   if (prefs.setup?.browser) {
     console.log("\n" + extensionHint(await extensionInstalled()))
   }
@@ -375,7 +372,7 @@ function reportStaleLauncher(): void {
 
 async function reportClaudeInstallNotes(): Promise<void> {
   reportStaleLauncher()
-  await reportChromeCaveat()
+  await reportBrowserNotes()
   const home = homedir()
   const stale = join(home, ".claude", "cache", "gateway-models.json")
   if (await Bun.file(stale).exists()) {

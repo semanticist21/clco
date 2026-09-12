@@ -89,7 +89,6 @@ async function openExclusive(path: string) {
 export interface SetupPrefs {
   version: number
   bypass: boolean
-  chrome: boolean
   select: boolean
   /** Register the Browser MCP server for clco sessions. Added in v2. */
   browser?: boolean

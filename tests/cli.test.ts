@@ -50,16 +50,16 @@ describe("parseArgs — setup", () => {
   })
 
   test("consumes --no-* instead of passing it to claude", () => {
-    const args = parseArgs(["--no-chrome", "--no-bypass"])
-    expect(args.overrides).toEqual({ chrome: false, bypass: false })
+    const args = parseArgs(["--no-browser", "--no-bypass"])
+    expect(args.overrides).toEqual({ browser: false, bypass: false })
     expect(args.claudeArgs).toEqual([])
   })
 
   // The first unknown dashed flag hands everything after it to claude, so the
   // --no-* forms have to be consumed before that point.
   test("keeps claude's own flags intact alongside --no-*", () => {
-    const args = parseArgs(["--no-chrome", "-p", "hi"])
-    expect(args.overrides).toEqual({ chrome: false })
+    const args = parseArgs(["--no-browser", "-p", "hi"])
+    expect(args.overrides).toEqual({ browser: false })
     expect(args.claudeArgs).toEqual(["-p", "hi"])
   })
 })
