@@ -10,6 +10,15 @@
 // Anthropic types (subset Claude Code actually sends)
 // ---------------------------------------------------------------------------
 
+import {
+  type ContentBlock,
+  type ImageBlock,
+  type RawBlock,
+  type ToolResultBlock,
+  type ToolUseBlock,
+  classifyContent,
+} from "./blocks"
+
 interface CacheControl {
   cache_control?: { type?: string } | null
 }
@@ -32,45 +41,12 @@ function marked(blocks: unknown): boolean {
 // `copilot_cache_control` rather than the standard `cache_control`.
 const COPILOT_CACHE = { type: "ephemeral" } as const
 
-interface AnthropicThinkingBlock {
-  type: "thinking"
-  thinking: string
-}
-
-interface AnthropicImageBlock {
-  type: "image"
-  source: { type: string; media_type: string; data: string }
-}
-
-interface AnthropicToolUseBlock {
-  type: "tool_use"
-  id: string
-  name: string
-  input: Record<string, unknown>
-}
-
-interface AnthropicToolResultBlock {
-  type: "tool_result"
-  tool_use_id: string
-  is_error?: boolean
-  content?:
-    | string
-    | Array<AnthropicTextBlock | AnthropicImageBlock | AnthropicThinkingBlock>
-}
-
-type AnthropicUserBlock =
-  | AnthropicTextBlock
-  | AnthropicImageBlock
-  | AnthropicToolResultBlock
-
-type AnthropicAssistantBlock =
-  | AnthropicTextBlock
-  | AnthropicThinkingBlock
-  | AnthropicToolUseBlock
+// blocks.ts owns what a content block IS; this file only renders one into the
+// chat/completions dialect.
 
 interface AnthropicMessage {
   role: "user" | "assistant"
-  content: string | Array<AnthropicUserBlock | AnthropicAssistantBlock>
+  content: string | ContentBlock[]
 }
 
 interface AnthropicTool {
@@ -200,7 +176,7 @@ export interface OpenAIResponse {
 
 export type AnthropicContentBlock =
   | AnthropicTextBlock
-  | AnthropicToolUseBlock
+  | ToolUseBlock
 
 export interface AnthropicResponse {
   id: string
@@ -258,7 +234,7 @@ function debugWarn(message: string): void {
   if (process.env.CLCO_DEBUG) console.error("[clco:debug]", message)
 }
 
-function toImagePart(block: AnthropicImageBlock): OpenAIImagePart {
+function toImagePart(block: ImageBlock): OpenAIImagePart {
   return {
     type: "image_url",
     image_url: {
@@ -270,7 +246,7 @@ function toImagePart(block: AnthropicImageBlock): OpenAIImagePart {
 // Tool messages must carry string content (OpenAI schema); images are moved
 // into the adjacent user message instead, otherwise one image tool_result
 // would poison every subsequent request in the session.
-function toolResultText(result: AnthropicToolResultBlock): {
+function toolResultText(result: ToolResultBlock): {
   text: string
   images: OpenAIImagePart[]
 } {
@@ -280,12 +256,17 @@ function toolResultText(result: AnthropicToolResultBlock): {
     text = result.content
   } else if (Array.isArray(result.content)) {
     const texts: string[] = []
-    for (const block of result.content) {
-      if (block.type === "text") texts.push(block.text)
-      else if (block.type === "thinking") texts.push(block.thinking)
-      else if (block.type === "image") images.push(toImagePart(block))
+    for (const view of classifyContent(result.content)) {
+      if (view.kind === "text") texts.push(view.text)
+      else if (view.kind === "image") images.push(toImagePart(view.block))
+      // A tool_result nesting a tool_use or a document is not something the
+      // protocol produces, but saying so beats dropping it.
+      else if (view.kind === "unsupported") {
+        texts.push(view.text)
+        debugWarn(`tool_result carried a ${view.blockType} block`)
+      }
     }
-    text = texts.join("\n\n")
+    text = texts.filter(Boolean).join("\n\n")
   } else {
     text = ""
   }
@@ -304,7 +285,7 @@ function translateUserMessage(message: AnthropicMessage): OpenAIMessage[] {
   }
   const out: OpenAIMessage[] = []
   const toolResults = message.content.filter(
-    (b): b is AnthropicToolResultBlock => b.type === "tool_result",
+    (b): b is ToolResultBlock => b.type === "tool_result",
   )
   const rest = message.content.filter((b) => b.type !== "tool_result")
 
@@ -318,10 +299,15 @@ function translateUserMessage(message: AnthropicMessage): OpenAIMessage[] {
 
   const restTexts: string[] = []
   const restImages: OpenAIImagePart[] = []
-  for (const block of rest) {
-    if (block.type === "text") restTexts.push(block.text)
-    else if (block.type === "thinking") restTexts.push(block.thinking)
-    else if (block.type === "image") restImages.push(toImagePart(block))
+  for (const view of classifyContent(rest)) {
+    if (view.kind === "text") restTexts.push(view.text)
+    else if (view.kind === "image") restImages.push(toImagePart(view.block))
+    // Never silence. A PDF attachment used to translate to nothing at all, so
+    // the model answered about a document it had never seen.
+    else if (view.kind === "unsupported") {
+      restTexts.push(view.text)
+      debugWarn(`dropped a ${view.blockType} block from a user message`)
+    }
   }
 
   if (images.length > 0 || restImages.length > 0) {
@@ -333,7 +319,7 @@ function translateUserMessage(message: AnthropicMessage): OpenAIMessage[] {
     if (text) parts.push({ type: "text", text })
     out.push({ role: "user", content: parts })
   } else if (rest.length > 0) {
-    out.push({ role: "user", content: restTexts.join("\n\n") })
+    out.push({ role: "user", content: restTexts.filter(Boolean).join("\n\n") })
   }
   return out
 }
@@ -343,16 +329,20 @@ function translateAssistantMessage(message: AnthropicMessage): OpenAIMessage[] {
     return [{ role: "assistant", content: message.content }]
   }
   const toolUses = message.content.filter(
-    (b): b is AnthropicToolUseBlock => b.type === "tool_use",
+    (b): b is ToolUseBlock => b.type === "tool_use",
   )
-  // OpenAI has no thinking blocks; fold them into text (they are usually
-  // empty here anyway because CLAUDE_CODE_DISABLE_THINKING is set).
-  const text = message.content
-    .filter(
-      (b): b is AnthropicTextBlock | AnthropicThinkingBlock =>
-        b.type === "text" || b.type === "thinking",
-    )
-    .map((b) => (b.type === "text" ? b.text : b.thinking))
+  // OpenAI has no thinking blocks; the classifier folds them into text (they
+  // are usually empty here anyway because CLAUDE_CODE_DISABLE_THINKING is set).
+  const text = classifyContent(message.content)
+    .map((view) => {
+      if (view.kind === "text") return view.text
+      if (view.kind === "unsupported") {
+        debugWarn(`dropped a ${view.blockType} block from an assistant message`)
+        return view.text
+      }
+      return ""
+    })
+    .filter(Boolean)
     .join("\n\n")
 
   if (toolUses.length > 0) {
