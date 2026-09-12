@@ -265,3 +265,38 @@ describe("duplicate display names", () => {
     expect(by("big").description).not.toContain("⚠")
   })
 })
+
+describe("internal Copilot plumbing", () => {
+  const m = (id: string, family: string) => ({
+    id,
+    name: id,
+    endpoints: ["/chat/completions"],
+    efforts: null,
+    maxPromptTokens: 244000,
+    type: "chat",
+    family,
+  })
+
+  // These answer like models but are Copilot's own search/exec/compaction
+  // machinery. They declare a role as their family where a real model
+  // declares its own name, which is the only signal separating them.
+  test("role-family entries are hidden, real models are not", () => {
+    const picker = buildModelPickerFrom([
+      m("copilot-search-a", "search-agent"),
+      m("exec-agent-a", "exec-agent"),
+      m("trajectory-compaction", "trajectory-compaction"),
+      m("gpt-4o", "gpt-4o"),
+    ])!
+    expect(picker.options.map((o) => o.model)).toEqual(["gpt-4o[1m]"])
+  })
+
+  test("CLCO_SHOW_INTERNAL brings them back", () => {
+    process.env.CLCO_SHOW_INTERNAL = "1"
+    try {
+      const picker = buildModelPickerFrom([m("copilot-search-a", "search-agent")])!
+      expect(picker.options).toHaveLength(1)
+    } finally {
+      delete process.env.CLCO_SHOW_INTERNAL
+    }
+  })
+})

@@ -136,6 +136,8 @@ export interface UpstreamModel {
   pickerEnabled?: boolean
   /** capabilities.type — "chat" for anything you can hold a turn with. */
   type?: string
+  /** capabilities.family — a model name, or a role for internal plumbing. */
+  family?: string
 }
 
 // Raw upstream model list, captured during discovery at startup. The server
@@ -165,6 +167,7 @@ interface RawModel {
   policy?: { state?: string }
   capabilities?: {
     type?: string
+    family?: string
     limits?: { max_prompt_tokens?: number; max_context_window_tokens?: number }
     supports?: { reasoning_effort?: string[] }
   }
@@ -186,6 +189,7 @@ function toUpstreamModel(m: RawModel): UpstreamModel | null {
     policyState: m.policy?.state,
     pickerEnabled: m.model_picker_enabled,
     type: m.capabilities?.type,
+    family: m.capabilities?.family,
   }
 }
 

@@ -24,6 +24,16 @@ import { normalizeModel } from "./translate"
 /** Endpoints a model must serve to hold a conversation at all. */
 const CHAT_ENDPOINTS = ["/v1/messages", "/responses", "/chat/completions"]
 
+// Copilot plumbing that answers like a model but is not one to pick: these
+// declare a role as their capability family ("search-agent") where a real
+// model declares its own name ("gpt-4o"). Hidden by default; CLCO_SHOW_INTERNAL
+// brings them back, which matters on plans where little else is available.
+const INTERNAL_FAMILIES = new Set([
+  "search-agent",
+  "exec-agent",
+  "trajectory-compaction",
+])
+
 /** Above this, Claude Code needs the [1m] suffix to unlock the real window. */
 const DEFAULT_WINDOW_CEILING = 200_000
 
@@ -255,6 +265,13 @@ function routeOf(m: UpstreamModel): string {
 // and `supported_endpoints`; Copilot serves those over /chat/completions, and
 // so does the adapter, so absent metadata must not exclude them.
 function conversational(m: UpstreamModel): boolean {
+  if (
+    m.family &&
+    INTERNAL_FAMILIES.has(m.family) &&
+    !process.env.CLCO_SHOW_INTERNAL
+  ) {
+    return false
+  }
   if (m.type) return m.type === "chat"
   if (m.endpoints.length === 0) return true
   return m.endpoints.some((e) => CHAT_ENDPOINTS.includes(e))
