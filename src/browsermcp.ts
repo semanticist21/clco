@@ -20,11 +20,12 @@ export const EXTENSION_ID = "mmlmfjhmonkocbjadbfplnigmagldckm"
 export const EXTENSION_NAME = "Playwright MCP Bridge"
 export const EXTENSION_URL =
   `https://chromewebstore.google.com/detail/playwright-extension/${EXTENSION_ID}`
-// Pinned rather than @latest: with -y, every session would fetch and execute
-// whatever was published most recently, inside a claude whose permission
-// prompts default to off and whose browser tools drive a logged-in profile.
-// One bad publish would reach every user the same day. Bump deliberately.
-export const MCP_PACKAGE = "@playwright/mcp@0.0.80"
+// @latest, not a pin. It resolves the `latest` dist-tag — stable releases,
+// roughly weekly, not the daily alphas — and a 0.0.x package pinned here goes
+// stale against an extension that auto-updates from the Web Store. Pinning
+// also does not buy what it looks like it buys: npx has to reach the registry
+// either way, so it does not help the restricted networks clco targets.
+export const MCP_PACKAGE = "@playwright/mcp@latest"
 /** Set by the extension; with it the bridge attaches without a dialog. */
 export const TOKEN_ENV = "PLAYWRIGHT_MCP_EXTENSION_TOKEN"
 
@@ -145,6 +146,30 @@ export function parseToken(input: string): string | null | undefined {
 }
 
 /**
+ * Whether npx can actually fetch the server.
+ *
+ * The package is resolved from the registry at session start, so on a network
+ * that blocks or proxies npm the server never starts — and the failure would
+ * otherwise surface only as an MCP connection error inside claude, with clco's
+ * own startup line still claiming success. Checked with a short timeout so a
+ * slow registry delays nothing.
+ */
+export async function registryReachable(timeoutMs = 2500): Promise<boolean> {
+  try {
+    const proc = Bun.spawn(["npm", "view", "@playwright/mcp", "version"], {
+      stdout: "ignore",
+      stderr: "ignore",
+    })
+    const timer = setTimeout(() => proc.kill(), timeoutMs)
+    const code = await proc.exited
+    clearTimeout(timer)
+    return code === 0
+  } catch {
+    return false
+  }
+}
+
+/**
  * One line for the startup summary, alongside adapter and model. Whether a
  * session is attached is not knowable here — the server starts per
  * conversation — so this reports what clco did, and whether a connect dialog
@@ -156,6 +181,8 @@ export function startupLine(
   token?: string,
   /** The installer guarantees bun, not Node - and the server runs under npx. */
   hasNpx = Bun.which("npx") !== null,
+  /** Undefined when not checked; false when the registry is unreachable. */
+  reachable?: boolean,
 ): string | null {
   if (!enabled) return null
   if (!installed) {
@@ -163,6 +190,12 @@ export function startupLine(
   }
   if (!hasNpx) {
     return "! browser: npx not found - Playwright MCP needs Node.js on PATH"
+  }
+  if (reachable === false) {
+    return (
+      "! browser: cannot reach the npm registry - Playwright MCP is fetched at" +
+      " session start, so browser tools will not appear"
+    )
   }
   return `+ browser: Playwright MCP${token ? "" : " (connect dialog each session)"}`
 }

@@ -298,3 +298,26 @@ describe("token clearing", () => {
     }
   })
 })
+
+describe("registry reachability", () => {
+  // The server is fetched at session start, so on a network that blocks npm
+  // it never starts - and that failure would otherwise appear only as an MCP
+  // error inside claude, while clco's startup line claimed success.
+  test("says so instead of claiming success", () => {
+    expect(startupLine(true, true, "tok", true, false)).toContain(
+      "cannot reach the npm registry",
+    )
+    expect(startupLine(true, true, "tok", true, true)).toBe(
+      "+ browser: Playwright MCP",
+    )
+    // Not checked is not the same as unreachable.
+    expect(startupLine(true, true, "tok", true, undefined)).toBe(
+      "+ browser: Playwright MCP",
+    )
+  })
+
+  // A missing npx is the more basic problem and should be named first.
+  test("reports a missing npx ahead of the registry", () => {
+    expect(startupLine(true, true, "tok", false, false)).toContain("npx not found")
+  })
+})

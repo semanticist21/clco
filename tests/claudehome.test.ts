@@ -108,16 +108,44 @@ describe("prepareClaudeHome", () => {
     await rm(home, { recursive: true, force: true })
   })
 
-  test("strips the model key from a settings.json claude tolerates but JSON.parse does not", async () => {
-    const home = join(tmpdir(), `clco-jsonc-${Date.now()}`)
+  // A line-based strip broke this three ways: it left a dangling comma when
+  // `model` was the last key, reached `model` nested in other objects, and
+  // missed it when it shared a line with another key.
+  test("strips only the top-level model key, and leaves valid JSON", async () => {
+    const cases: Array<[string, string]> = [
+      ["last key", '{\n  // c\n  "env": { "A": "1" },\n  "model": "gpt-4.1"\n}'],
+      ["shares a line", '{ "model": "gpt-4.1", "env": { "A": "1" } }'],
+      ["nested model stays", '{\n  "model": "gpt-4.1",\n  "env": { "model": "keep" }\n}'],
+      ["trailing comma", '{\n  "model": "gpt-4.1",\n  "env": { "A": "1" },\n}'],
+    ]
+    for (const [name, body] of cases) {
+      const home = join(tmpdir(), `clco-jsonc-${Date.now()}-${name.replace(/ /g, "")}`)
+      const real = join(home, ".claude")
+      await mkdir(real, { recursive: true })
+      await writeFile(join(real, "settings.json"), body)
+      const dir = (await run(home))!
+      const out = await readFile(join(dir, "settings.json"), "utf8")
+      const parsed = JSON.parse(out) as Record<string, unknown>
+      expect(parsed.model).toBeUndefined()
+      expect(parsed.env).toBeDefined()
+      if (name === "nested model stays") {
+        expect((parsed.env as Record<string, unknown>).model).toBe("keep")
+      }
+      await rm(home, { recursive: true, force: true })
+    }
+  })
+
+  // Replacing an unparseable file with something broken would lose every
+  // setting; keeping the previous copy at least keeps the session working.
+  test("keeps the previous copy when neither form parses", async () => {
+    const home = join(tmpdir(), `clco-broken-${Date.now()}`)
     const real = join(home, ".claude")
     await mkdir(real, { recursive: true })
-    await writeFile(
-      join(real, "settings.json"),
-      '{\n  // a comment claude accepts\n  "model": "gpt-4.1",\n  "env": {}\n}',
-    )
+    await writeFile(join(real, "settings.json"), '{ "env": ')
     const dir = (await run(home))!
-    expect(await readFile(join(dir, "settings.json"), "utf8")).not.toContain("gpt-4.1")
+    await writeFile(join(dir, "settings.json"), '{"kept":true}')
+    await run(home)
+    expect(JSON.parse(await readFile(join(dir, "settings.json"), "utf8")).kept).toBe(true)
     await rm(home, { recursive: true, force: true })
   })
 

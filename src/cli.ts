@@ -29,6 +29,7 @@ import {
   extensionHint,
   extensionInstalled,
   parseToken,
+  registryReachable,
   startupLine,
 } from "./browsermcp"
 import {
@@ -649,10 +650,16 @@ async function main(): Promise<void> {
   console.error(
     `+ model: ${defaultModel ?? models.sonnet} (sonnet=${models.sonnet} opus=${models.opus} haiku=${models.haiku})`,
   )
+  const browserEnabled =
+    setup?.browser === true && args.overrides.browser !== false
+  const browserExtension = browserEnabled ? await extensionInstalled() : false
   const browserLine = startupLine(
-    setup?.browser === true && args.overrides.browser !== false,
-    await extensionInstalled(),
+    browserEnabled,
+    browserExtension,
     setup?.browserToken,
+    undefined,
+    // Only worth asking when everything else is in place.
+    browserExtension ? await registryReachable() : undefined,
   )
   if (browserLine) console.error(browserLine)
 

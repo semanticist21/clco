@@ -48,12 +48,9 @@ const PRIVATE_ENTRIES = new Set([
  */
 async function writeSettings(real: string, home: string): Promise<void> {
   const target = join(home, "settings.json")
-  let source: string | null = null
-  try {
-    source = await readFile(join(real, "settings.json"), "utf8")
-  } catch {
-    // No global settings: keep what is already private, minus `model`.
-  }
+  const source = await readFile(join(real, "settings.json"), "utf8").catch(
+    () => null,
+  )
   const existing = await readFile(target, "utf8").catch(() => null)
   const raw = source ?? existing
   if (raw === null) return
@@ -62,13 +59,62 @@ async function writeSettings(real: string, home: string): Promise<void> {
     delete parsed.model
     await atomicWrite(target, JSON.stringify(parsed, null, 2) + "\n")
   } catch {
-    // claude tolerates comments where JSON.parse does not, so keep the file
-    // and strip only the key that must not carry over.
-    await atomicWrite(
-      target,
-      raw.replace(/^\s*"model"\s*:\s*("(?:[^"\\]|\\.)*"|null)\s*,?\s*$/gm, ""),
-    )
+    // claude tolerates comments where JSON.parse does not. A line-based regex
+    // was worse than useless here: deleting the last key's line left a
+    // dangling comma and broke the file outright, it reached "model" keys
+    // nested in other objects, and it missed the key when it shared a line.
+    // Strip comments, parse, and re-emit — losing the comments is a smaller
+    // loss than losing the settings.
+    try {
+      const parsed = JSON.parse(stripJsonComments(raw)) as Record<string, unknown>
+      delete parsed.model
+      await atomicWrite(target, JSON.stringify(parsed, null, 2) + "\n")
+    } catch (err) {
+      // Neither form parses: keep the previous private file rather than
+      // replace it with something broken, and say so - a stale `model` here
+      // is exactly what this function exists to prevent.
+      console.error(
+        `[clco] could not parse ${join(real, "settings.json")} (${(err as Error).message});` +
+          " clco's copy was left as it was.",
+      )
+    }
   }
+}
+
+/** Comments only — string contents are left alone. */
+function stripJsonComments(input: string): string {
+  let out = ""
+  let inString = false
+  let escaped = false
+  for (let i = 0; i < input.length; i++) {
+    const c = input[i]!
+    if (inString) {
+      out += c
+      if (escaped) escaped = false
+      else if (c === "\\") escaped = true
+      else if (c === '"') inString = false
+      continue
+    }
+    if (c === '"') {
+      inString = true
+      out += c
+      continue
+    }
+    if (c === "/" && input[i + 1] === "/") {
+      while (i < input.length && input[i] !== "\n") i++
+      out += "\n"
+      continue
+    }
+    if (c === "/" && input[i + 1] === "*") {
+      i += 2
+      while (i < input.length && !(input[i] === "*" && input[i + 1] === "/")) i++
+      i++
+      continue
+    }
+    out += c
+  }
+  // Trailing commas are legal in JSONC and fatal to JSON.parse.
+  return out.replace(/,(\s*[}\]])/g, "$1")
 }
 
 // A second clco launch refreshes this file while the first session may be
@@ -109,8 +155,10 @@ async function syncClaudeState(userHome: string, home: string): Promise<void> {
     const realProjects = (real.projects ?? {}) as Record<string, { hasTrustDialogAccepted?: boolean }>
     const myProjects = (mine.projects ?? {}) as Record<string, { hasTrustDialogAccepted?: boolean }>
     for (const [path, entry] of Object.entries(myProjects)) {
-      const trusted = realProjects[path]?.hasTrustDialogAccepted
-      if (trusted !== undefined) entry.hasTrustDialogAccepted = trusted
+      // A deleted project entry is how trust is withdrawn, so treat "absent"
+      // as untrusted rather than leaving the stale grant in place.
+      entry.hasTrustDialogAccepted =
+        realProjects[path]?.hasTrustDialogAccepted ?? false
     }
     await atomicWrite(target, JSON.stringify(mine, null, 2) + "\n")
   } catch {
