@@ -88,6 +88,23 @@ describe("browser control", () => {
     expect(server.args).toContain("--extension")
   })
 
+  // The override exists for people whose network clco cannot guess at: an
+  // internal mirror, a prefetched version, a rollback past a bad release.
+  test("CLCO_MCP_PACKAGE replaces the spec, and only when set", () => {
+    const spec = (config: string | null) =>
+      JSON.parse(config!).mcpServers.playwright.args[1]
+    expect(spec(browserMcpConfig(true, undefined, "@corp/playwright-mcp@1.2.3")))
+      .toBe("@corp/playwright-mcp@1.2.3")
+    // The default has to stay the literal default when nothing overrides it -
+    // an override that leaked into the unset case would be invisible here
+    // otherwise.
+    expect(spec(browserMcpConfig(true, undefined))).toBe("@playwright/mcp@latest")
+    // And the startup line has to name what actually runs, or "which version
+    // was that?" has no answer after a bad release.
+    expect(startupLine(true, true, "tok", true, true, undefined, "@corp/x@1.0.0"))
+      .toBe("+ browser: @corp/x@1.0.0")
+  })
+
   // The extension is the half clco cannot install; registering the server
   // alone would surface tools that fail on every call.
   test("registers nothing when the extension is missing", () => {
@@ -202,7 +219,7 @@ describe("token parsing", () => {
 
 describe("startup line", () => {
   test("reports what clco did, and whether a dialog is coming", () => {
-    expect(startupLine(true, true, "tok")).toBe("+ browser: Playwright MCP")
+    expect(startupLine(true, true, "tok")).toBe("+ browser: @playwright/mcp@latest")
     expect(startupLine(true, true)).toContain("connect dialog each session")
     expect(startupLine(true, false)).toContain("not installed")
     expect(startupLine(true, false)).toContain("chromewebstore.google.com")
@@ -316,11 +333,11 @@ describe("registry reachability", () => {
       "cannot reach the npm registry",
     )
     expect(startupLine(true, true, "tok", true, true)).toBe(
-      "+ browser: Playwright MCP",
+      "+ browser: @playwright/mcp@latest",
     )
     // Not checked is not the same as unreachable.
     expect(startupLine(true, true, "tok", true, undefined)).toBe(
-      "+ browser: Playwright MCP",
+      "+ browser: @playwright/mcp@latest",
     )
   })
 
@@ -339,7 +356,7 @@ describe("startup line honesty", () => {
       "your own --mcp-config takes over",
     )
     expect(startupLine(true, true, "tok", true, true, true)).toBe(
-      "+ browser: Playwright MCP",
+      "+ browser: @playwright/mcp@latest",
     )
   })
 })

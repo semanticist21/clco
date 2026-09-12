@@ -92,6 +92,7 @@ const ENVIRONMENT: ReadonlyArray<[string, string]> = [
   ["CLCO_NO_SELECT=1", "Skip the startup model prompt"],
   ["CLCO_NO_PASSTHROUGH=1", "Disable the native /v1/messages route (always translate)"],
   ["CLCO_DEBUG=1", "Write adapter request logs to ~/.config/clco/adapter.log"],
+  ["CLCO_MCP_PACKAGE", "Override the Playwright MCP package spec (mirror, pin, rollback)"],
   ["CLCO_UPSTREAM", "Override the upstream base URL (mock testing; skips auth)"],
 ]
 

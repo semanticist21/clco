@@ -17,7 +17,7 @@ $ clco
 └
 + adapter: http://127.0.0.1:56844
 + model: claude-sonnet-5 (sonnet=claude-sonnet-5 opus=claude-opus-5 haiku=claude-haiku-4.5)
-+ browser: Playwright MCP
++ browser: @playwright/mcp@latest
 ```
 
 ## Install
@@ -52,12 +52,15 @@ clco
 3. **Pick a model**, then claude starts. Switch mid-session with `/model`.
 
    Answering yes to the first two together is worth understanding: claude runs
-   without permission prompts, and each session resolves and runs the current
-   `@playwright/mcp` release from npm (`bunx -y @playwright/mcp@latest`) with
-   access to the browser tab you share. Not a pinned version — it is re-resolved
-   every session. Either is reasonable alone; both at once is a lot of trust in
-   one command. `clco setup` changes them, `--no-bypass` / `--no-browser` skip
-   them for a single run.
+   without permission prompts, and each session resolves the current
+   `@playwright/mcp` release from npm (`bunx -y @playwright/mcp@latest`) and runs
+   it with access to the browser tab you share. The version is re-resolved every
+   session, so a release published today runs on your machine today; nothing in
+   this path checks an integrity hash. Either answer is reasonable alone; both at
+   once is a lot of trust in one command. `clco setup` changes them,
+   `--no-bypass` / `--no-browser` skip them for a single run, and
+   `CLCO_MCP_PACKAGE` pins or redirects the package — see
+   [Browser control](#browser-control).
 
 ## Usage
 
@@ -103,13 +106,29 @@ connect dialog every session:
 pbpaste | clco token       # clco token --clear to remove it
 ```
 
-Started with `bunx` (or `npx`), fetched at session start — so on a network that blocks the npm registry, clco says so at startup rather than leaving you with missing tools.
+Started with `bunx` (or `npx`) and re-resolved each session; ~18MB crosses the
+wire only on the first run or after a new release, but the version is looked up
+every time. If `registry.npmjs.org` is unreachable, clco says so at startup
+rather than leaving you with missing tools — that check only knows about
+`registry.npmjs.org`, so it cannot speak for an internal mirror.
+
+`CLCO_MCP_PACKAGE` overrides the spec — an internal mirror's name, a pinned
+version, or a rollback past a bad release:
+
+```sh
+CLCO_MCP_PACKAGE=@playwright/mcp@0.0.80 clco
+```
+
+Pinning is not an offline mode. `bunx` skips the registry only when it still has
+its scratch install for that exact version, which macOS purges after three days
+and at every boot — so a first run, a new laptop, or a reboot needs the registry
+whichever spec you use. clco has no offline path for browser control.
 
 ## What clco reads
 
 Nothing clco reads from your disk leaves the machine. Its outbound requests are
 GitHub login, the Copilot token exchange, the model list, your chat itself,
-plus — with browser control on — fetching `@playwright/mcp` from npm each
+plus — with browser control on — resolving `@playwright/mcp` against npm each
 session, and `git pull` when you run `clco update`.
 
 - **Chrome, Chromium and Edge profile directories** — directory *names* only, to

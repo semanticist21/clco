@@ -21,12 +21,40 @@ export const EXTENSION_ID = "mmlmfjhmonkocbjadbfplnigmagldckm"
 export const EXTENSION_NAME = "Playwright MCP Bridge"
 export const EXTENSION_URL =
   `https://chromewebstore.google.com/detail/playwright-extension/${EXTENSION_ID}`
-// @latest, not a pin. It resolves the `latest` dist-tag — stable releases,
-// roughly weekly, not the daily alphas — and a 0.0.x package pinned here goes
-// stale against an extension that auto-updates from the Web Store. Pinning
-// also does not buy what it looks like it buys: npx has to reach the registry
-// either way, so it does not help the restricted networks clco targets.
+// @latest, not a pin, and the reasoning matters because an earlier version of
+// this comment got it wrong twice.
+//
+// What a pin would buy is smaller than it looks. bunx keeps a scratch install
+// per exact spec string at $TMPDIR/bunx-<uid>-@playwright/mcp@<version>/, and
+// only that directory lets it skip the registry; the shared ~/.bun/install
+// cache does not (measured: fresh TMPDIR with a warm package cache and an
+// unreachable registry still fails on "downloading package manifest"). On
+// macOS that scratch directory is purged by com.apple.bsd.dirhelper after
+// CLEAN_FILES_OLDER_THAN_DAYS=3 and again at boot. So a pin keeps working
+// offline only on a machine that ran that exact version within ~3 days and has
+// not rebooted - no first run, no new laptop, no post-reboot. clco has no
+// offline path for browser control, and nothing here should imply otherwise.
+//
+// What @latest buys is that the server half stays in step with an extension
+// half that auto-updates from the Web Store and negotiates a protocol version
+// with it. How much skew that negotiation tolerates is not known - mismatch is
+// reported as VersionMismatchError (playwright-mcp #1090, #1452, #1571, #1579)
+// but no published number says how many releases behind still connects.
+//
+// Neither choice is a supply-chain control. The repo's bun.lock does not cover
+// this: the package is resolved by a bunx subprocess of claude, in its own
+// generated lockfile, with no integrity hash clco ever sees. A pinned version
+// string is not verification, and must not be read as any.
+//
+// CLCO_MCP_PACKAGE overrides the spec for anyone whose situation this default
+// does not fit - an internal mirror, a prefetched version, or rolling back a
+// bad upstream release.
 export const MCP_PACKAGE = "@playwright/mcp@latest"
+
+/** The spec clco will actually register, override included. */
+export function mcpPackage(): string {
+  return process.env.CLCO_MCP_PACKAGE || MCP_PACKAGE
+}
 /** Set by the extension; with it the bridge attaches without a dialog. */
 export const TOKEN_ENV = "PLAYWRIGHT_MCP_EXTENSION_TOKEN"
 
@@ -104,6 +132,8 @@ export async function extensionInstalled(home = homedir()): Promise<boolean> {
 export function browserMcpConfig(
   installed: boolean,
   caBundlePath = process.env.CLCO_CA_BUNDLE,
+  /** Read here rather than at module load so a test can set it. */
+  pkg = mcpPackage(),
 ): string | null {
   if (!installed) return null
   const env: Record<string, string> = {}
@@ -120,7 +150,7 @@ export function browserMcpConfig(
     mcpServers: {
       playwright: {
         command: runner(),
-        args: ["-y", MCP_PACKAGE, "--extension"],
+        args: ["-y", pkg, "--extension"],
         ...(Object.keys(env).length > 0 ? { env } : {}),
       },
     },
@@ -200,6 +230,7 @@ export function startupLine(
   reachable?: boolean,
   /** False when clco stood aside for a user-supplied --mcp-config. */
   registered?: boolean,
+  pkg = mcpPackage(),
 ): string | null {
   if (!enabled) return null
   if (!installed) {
@@ -217,7 +248,10 @@ export function startupLine(
       " session start, so browser tools will not appear"
     )
   }
-  return `+ browser: Playwright MCP${token ? "" : " (connect dialog each session)"}`
+  // Name the exact spec: it is user-overridable, it is what runs, and after a
+  // bad upstream release "which version did that session run?" has to be
+  // answerable from something.
+  return `+ browser: ${pkg}${token ? "" : " (connect dialog each session)"}`
 }
 
 /**
@@ -226,7 +260,7 @@ export function startupLine(
  */
 export function setupNote(installed: boolean): string {
   return installed
-    ? `${EXTENSION_NAME} detected - registering ${MCP_PACKAGE} --extension.\n` +
+    ? `${EXTENSION_NAME} detected - registering ${mcpPackage()} --extension.\n` +
         `Tools arrive as mcp__playwright__*. Click the extension to share a tab.`
     : `The ${EXTENSION_NAME} extension is not installed, and only you can\n` +
         `add it:\n  ${EXTENSION_URL}\n` +
@@ -246,7 +280,7 @@ export function extensionHint(installed: boolean, token?: string): string {
   // stored token is the closest thing to a prediction, since it is exactly
   // what removes the manual connect step.
   return (
-    `${EXTENSION_NAME} detected - registering ${MCP_PACKAGE} --extension.\n` +
+    `${EXTENSION_NAME} detected - registering ${mcpPackage()} --extension.\n` +
     `Tools arrive as mcp__playwright__*.\n` +
     (token
       ? `Extension token stored, so sessions attach without the connect dialog.`
