@@ -86,20 +86,26 @@ export async function extensionInstalled(home = homedir()): Promise<boolean> {
 export function browserMcpConfig(
   installed: boolean,
   caBundlePath = process.env.CLCO_CA_BUNDLE,
+  /** Stored extension token, if any — see setup.ts. */
+  token?: string,
 ): string | null {
   if (!installed) return null
+  const env: Record<string, string> = {}
+  // npx fetches from the registry over its own TLS, outside clco's
+  // copilotFetch, so a corporate CA has to be handed down explicitly -
+  // otherwise browser control is the one feature that still breaks on the
+  // network clco was hardened for.
+  if (caBundlePath) env.NODE_EXTRA_CA_CERTS = caBundlePath
+  // Named here rather than left to inherit from claude: --extension selects
+  // the mode, the token is what removes its connect dialog, and both belong
+  // to this server rather than to whatever spawned it.
+  if (token) env[TOKEN_ENV] = token
   return JSON.stringify({
     mcpServers: {
       playwright: {
         command: "npx",
         args: ["-y", MCP_PACKAGE, "--extension"],
-        // npx fetches from the registry over its own TLS, outside clco's
-        // copilotFetch, so a corporate CA has to be handed down explicitly -
-        // otherwise browser control is the one feature that still breaks on
-        // the network clco was hardened for.
-        ...(caBundlePath
-          ? { env: { NODE_EXTRA_CA_CERTS: caBundlePath } }
-          : {}),
+        ...(Object.keys(env).length > 0 ? { env } : {}),
       },
     },
   })

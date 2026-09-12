@@ -1,4 +1,7 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test"
+import { rm } from "node:fs/promises"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
 import {
   MCP_PACKAGE,
   browserMcpConfig,
@@ -219,9 +222,28 @@ describe("browser MCP under a TLS-inspecting proxy", () => {
     expect(server.env).toEqual({ NODE_EXTRA_CA_CERTS: "/tmp/ca.pem" })
   })
 
-  test("sets no env when no CA is configured", () => {
+  test("sets no env when neither a CA nor a token is configured", () => {
     expect(JSON.parse(browserMcpConfig(true, undefined)!).mcpServers.playwright.env)
       .toBeUndefined()
+  })
+
+  // --extension selects the mode; the token is what removes its connect
+  // dialog. Naming it on the server rather than letting it inherit from
+  // claude keeps the two halves of one feature in one place.
+  test("names the extension token on the server, alongside --extension", () => {
+    const server = JSON.parse(browserMcpConfig(true, undefined, "tok")!)
+      .mcpServers.playwright
+    expect(server.args).toContain("--extension")
+    expect(server.env).toEqual({ PLAYWRIGHT_MCP_EXTENSION_TOKEN: "tok" })
+  })
+
+  test("carries both when a CA and a token are set", () => {
+    const env = JSON.parse(browserMcpConfig(true, "/tmp/ca.pem", "tok")!)
+      .mcpServers.playwright.env
+    expect(env).toEqual({
+      NODE_EXTRA_CA_CERTS: "/tmp/ca.pem",
+      PLAYWRIGHT_MCP_EXTENSION_TOKEN: "tok",
+    })
   })
 
   // The installer guarantees bun, not Node, while startupLine would otherwise
@@ -229,5 +251,27 @@ describe("browser MCP under a TLS-inspecting proxy", () => {
   test("says so when npx is missing", () => {
     expect(startupLine(true, true, "tok", false)).toContain("npx not found")
     expect(startupLine(true, true, "tok", true)).not.toContain("npx")
+  })
+})
+
+describe("prefs merging", () => {
+  // The model prompt wrote { last_model } and the setup answers went with it,
+  // so choosing a model reset the wizard - observed on a live install.
+  test("writing one concern does not erase another", async () => {
+    const { loadPrefs, savePrefs, setConfigDir } = await import("../src/config")
+    const dir = join(tmpdir(), `clco-prefs-${Date.now()}`)
+    setConfigDir(dir)
+    try {
+      await savePrefs({
+        setup: { version: 2, bypass: true, select: true, browser: true },
+      })
+      await savePrefs({ last_model: "kimi-k3" })
+      const after = await loadPrefs()
+      expect(after.last_model).toBe("kimi-k3")
+      expect(after.setup?.browser).toBe(true)
+    } finally {
+      setConfigDir(null)
+      await rm(dir, { recursive: true, force: true })
+    }
   })
 })

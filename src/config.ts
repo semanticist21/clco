@@ -19,8 +19,16 @@ export interface AuthStore {
   login?: string
 }
 
+// Overridable so tests can exercise the real read/merge/write path without
+// writing into the user's live install.
+let configDir: string | null = null
+
+export function setConfigDir(dir: string | null): void {
+  configDir = dir
+}
+
 function authDir(): string {
-  return join(homedir(), ".config", "clco")
+  return configDir ?? join(homedir(), ".config", "clco")
 }
 
 function authPath(): string {
@@ -118,10 +126,18 @@ export async function loadPrefs(): Promise<Prefs> {
   }
 }
 
+/**
+ * Merge into the stored preferences.
+ *
+ * Every caller holds one concern — the model prompt writes `last_model`, setup
+ * writes `setup` — and a plain write let whichever ran last erase the other.
+ * Picking a model really did discard the setup answers.
+ */
 export async function savePrefs(prefs: Prefs): Promise<void> {
   await migrateFromClcopilot()
   await mkdir(authDir(), { recursive: true })
-  await writeFile(prefsPath(), JSON.stringify(prefs, null, 2) + "\n", {
+  const merged = { ...(await loadPrefs()), ...prefs }
+  await writeFile(prefsPath(), JSON.stringify(merged, null, 2) + "\n", {
     mode: 0o600,
   })
 }
