@@ -50,7 +50,6 @@ export async function runSetup(): Promise<SetupPrefs> {
       "Run without permission prompts? (--dangerously-skip-permissions)",
       current.bypass,
     ),
-    select: await ask("Pick a model each time clco starts?", current.select),
     // Claude's own Chrome integration cannot work here, so there is nothing to
     // ask about it — only an alternative to offer.
     browser: await ask(
@@ -58,6 +57,7 @@ export async function runSetup(): Promise<SetupPrefs> {
         "  Enable Playwright MCP for browser control instead?",
       current.browser ?? true,
     ),
+    select: await ask("Pick a model each time clco starts?", current.select),
   }
 
   if (setup.browser) {
