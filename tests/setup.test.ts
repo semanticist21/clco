@@ -149,9 +149,10 @@ describe("extension token", () => {
 })
 
 describe("token parsing", () => {
+  const want = "vsniGjCK1P0voIepAYLL_hVbDXq_tgzoHjH5aFa8Ffk"
+
   // The extension displays the whole assignment, so that is what gets pasted.
   test("accepts the value, the assignment, or an exported line", () => {
-    const want = "vsniGjCK1P0voIepAYLL"
     for (const input of [
       want,
       `PLAYWRIGHT_MCP_EXTENSION_TOKEN=${want}`,
@@ -161,6 +162,21 @@ describe("token parsing", () => {
     ]) {
       expect(parseToken(input)).toBe(want)
     }
+  })
+
+  // A terminal submits at the first newline, so a multi-line paste would
+  // otherwise store whichever line happened to come first.
+  test("picks the token line out of a multi-line paste", () => {
+    expect(parseToken(`Set this to bypass the dialog:\nPLAYWRIGHT_MCP_EXTENSION_TOKEN=${want}\n`))
+      .toBe(want)
+    expect(parseToken(`${want}\nkkomi@host ~ % clco setup`)).toBe(want)
+  })
+
+  // The shape check is what stopped a pasted shell prompt being saved as a
+  // token that could never work, with nothing to explain why.
+  test("rejects input that is not a token", () => {
+    expect(parseToken("kkomi@semanticist ~ % clco setup")).toBeNull()
+    expect(parseToken("no")).toBeNull()
   })
 
   test("treats an empty answer as skipped", () => {

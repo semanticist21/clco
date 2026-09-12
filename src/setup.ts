@@ -69,9 +69,14 @@ export async function runSetup(): Promise<SetupPrefs> {
       message:
         `${TOKEN_ENV} (optional) - skips the connect dialog every session.\n` +
         "  Paste the whole line from the extension, or just the value.\n" +
-        "  Enter to skip.",
+        "  Enter to skip, or set it later with: clco token",
       placeholder: "leave empty to skip",
       defaultValue: current.browserToken ?? "",
+      // Rejecting here beats storing a stray paste that would never work.
+      validate: (value) =>
+        parseToken(value ?? "") === null
+          ? "That does not look like the token - it is a long string of letters, digits, - and _."
+          : undefined,
     })
     if (!p.isCancel(token)) {
       const parsed = parseToken(String(token))

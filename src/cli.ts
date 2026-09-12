@@ -28,6 +28,7 @@ import { TLS_HINT, isTlsTrustError } from "./tls"
 import {
   extensionHint,
   extensionInstalled,
+  parseToken,
   startupLine,
 } from "./browsermcp"
 import {
@@ -84,7 +85,7 @@ Environment:
 interface Args {
   command:
     | "run" | "serve" | "auth" | "login" | "logout" | "update" | "status"
-    | "setup" | "version"
+    | "setup" | "version" | "token"
   port?: number
   /** Saved setup options turned off for this run via --no-*. */
   overrides: SetupOverrides
@@ -108,6 +109,7 @@ const COMMAND_LIST = `Commands:
   clco --no-browser    Skip the Browser MCP server for this run
   clco help            Show this help
   clco version         Print the version
+  clco token           Store the Playwright MCP token (reads stdin)
 
 claude args pass through:  clco -p "ask"  /  clco --chrome  /  clco --dangerously-skip-permissions`
 
@@ -129,7 +131,7 @@ export function parseArgs(rawArgv: string[]): Args {
     if (
       (arg === "serve" || arg === "auth" || arg === "login" ||
         arg === "logout" || arg === "update" || arg === "status" ||
-        arg === "setup" || arg === "version") &&
+        arg === "setup" || arg === "version" || arg === "token") &&
       command === "run"
     ) {
       command = arg
@@ -361,6 +363,30 @@ async function runStatus(): Promise<void> {
 // always an env-var session and the browser tools are never registered —
 // measured: mcp__claude-in-chrome__* appears in zero requests. clco therefore
 // never passes --chrome itself; this only catches someone passing it by hand.
+// A terminal submits a text prompt at the first newline, so pasting anything
+// with a trailing line break loses the rest — and the leftover runs as shell
+// input. Reading stdin sidesteps that entirely: `pbpaste | clco token`.
+async function runToken(): Promise<void> {
+  const raw = await new Response(Bun.stdin.stream()).text()
+  const parsed = parseToken(raw)
+  if (parsed === null) {
+    throw new Error(
+      "That does not look like the token - it is a long string of letters, digits, - and _.",
+    )
+  }
+  const prefs = await loadPrefs()
+  if (!prefs.setup) {
+    throw new Error("Run `clco setup` first, then store the token.")
+  }
+  await savePrefs({
+    ...prefs,
+    setup: { ...prefs.setup, browserToken: parsed ?? undefined },
+  })
+  console.log(
+    parsed ? "+ token stored" : "+ token cleared (sessions show the connect dialog)",
+  )
+}
+
 async function reportBrowserNotes(): Promise<void> {
   if (process.argv.includes("--chrome")) {
     console.log(
@@ -436,6 +462,11 @@ async function main(): Promise<void> {
 
   if (args.command === "update") {
     await runUpdate()
+    return
+  }
+
+  if (args.command === "token") {
+    await runToken()
     return
   }
 

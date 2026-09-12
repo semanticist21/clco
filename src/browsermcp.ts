@@ -92,18 +92,35 @@ export function browserMcpConfig(installed: boolean): string | null {
   })
 }
 
+// The extension mints a base64url value; nothing else should be accepted.
+// A paste can easily pick up a shell prompt or a stray line, and storing that
+// silently produces a token that never works and no clue why.
+const TOKEN_SHAPE = /^[A-Za-z0-9_-]{20,}$/
+
 /**
  * Accept what the extension actually puts on screen. It shows the whole
  * assignment, so pasting that verbatim is the obvious move — as is pasting
- * just the value, or a line copied with `export` in front. Take any of them.
+ * just the value, or a line copied with `export` in front. A multi-line paste
+ * keeps only the line carrying the token, since a terminal submits at the
+ * first newline and the rest would be lost anyway.
+ *
+ * Returns null for input that is not a token, so the caller can say so rather
+ * than store it.
  */
-export function parseToken(input: string): string | undefined {
-  const line = input.trim().replace(/^export\s+/, "")
-  const value = line.startsWith(`${TOKEN_ENV}=`)
-    ? line.slice(TOKEN_ENV.length + 1)
-    : line
-  // Shell-style quoting survives a copy from a snippet.
-  return value.trim().replace(/^(['"])(.*)\1$/, "$2").trim() || undefined
+export function parseToken(input: string): string | null | undefined {
+  const lines = input.split(/[\r\n]+/).map((l) => l.trim()).filter(Boolean)
+  if (lines.length === 0) return undefined // skipped
+  const line =
+    lines.find((l) => l.includes(`${TOKEN_ENV}=`)) ??
+    lines.find((l) => TOKEN_SHAPE.test(l)) ??
+    lines[0]!
+  const bare = line.replace(/^export\s+/, "")
+  const value = bare.includes(`${TOKEN_ENV}=`)
+    ? bare.slice(bare.indexOf(`${TOKEN_ENV}=`) + TOKEN_ENV.length + 1)
+    : bare
+  const cleaned = value.trim().replace(/^(['"])(.*)\1$/, "$2").trim()
+  if (!cleaned) return undefined
+  return TOKEN_SHAPE.test(cleaned) ? cleaned : null
 }
 
 /**
