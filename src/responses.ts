@@ -90,7 +90,7 @@ export function toResponsesRequest(
         if (images.length > 0) {
           text =
             (text ? `${text}\n\n` : "") +
-            `[이미지 ${images.length}개 — 다음 사용자 메시지에 첨부됨]`
+            `[${images.length} image(s) - attached to the next user message]`
           pendingImages.push(...images)
         }
         input.push({

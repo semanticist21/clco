@@ -59,7 +59,7 @@ describe("buildModelPickerFrom", () => {
     expect(picker.options[1]).toEqual({
       model: "gpt-5.6-luna[1m]",
       label: "Luna 5.6",
-      description: "gpt-5.6-luna · responses · 328k · effort 없음",
+      description: "gpt-5.6-luna · responses · 328k · no effort tiers",
       behavesAs: "claude-opus-5",
     })
   })
@@ -219,7 +219,7 @@ describe("duplicate display names", () => {
     )!
     const by = (id: string) =>
       picker.options.find((o) => o.description!.startsWith(id))!
-    expect(by("small").description).toContain("⚠한도 12k")
+    expect(by("small").description).toContain("! caps at 12k")
     expect(by("big").description).not.toContain("⚠")
   })
 })

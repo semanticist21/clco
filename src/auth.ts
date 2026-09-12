@@ -45,7 +45,7 @@ export async function runDeviceFlow(): Promise<{ token: string; login?: string }
     signal: AbortSignal.timeout(15_000),
   })
   if (!res.ok) {
-    throw new Error(`device code 요청 실패: HTTP ${res.status}`)
+    throw new Error(`device code request failed: HTTP ${res.status}`)
   }
   const dc = (await res.json()) as {
     device_code: string
@@ -55,9 +55,9 @@ export async function runDeviceFlow(): Promise<{ token: string; login?: string }
     interval: number
   }
 
-  console.log("\nGitHub 인증이 필요합니다:")
-  console.log(`  1. 브라우저에서 열기: ${dc.verification_uri}`)
-  console.log(`  2. 코드 입력: \x1b[1m${dc.user_code}\x1b[0m\n`)
+  console.log("\nGitHub authentication required:")
+  console.log(`  1. Open in your browser: ${dc.verification_uri}`)
+  console.log(`  2. Enter the code: \x1b[1m${dc.user_code}\x1b[0m\n`)
 
   if (process.platform === "darwin") {
     const open = Bun.spawn(["open", dc.verification_uri], {
@@ -93,9 +93,9 @@ export async function runDeviceFlow(): Promise<{ token: string; login?: string }
       if (!poll.ok) {
         // 4xx won't heal by waiting; 5xx might.
         if (poll.status >= 400 && poll.status < 500) {
-          throw new Error(`device flow 폴링 실패: HTTP ${poll.status}`)
+          throw new Error(`device flow polling failed: HTTP ${poll.status}`)
         }
-        console.error(`[clco] 폴링 오류 HTTP ${poll.status} — 재시도`)
+        console.error(`[clco] polling error HTTP ${poll.status} - retrying`)
         continue
       }
       body = (await poll.json()) as typeof body
@@ -122,9 +122,9 @@ export async function runDeviceFlow(): Promise<{ token: string; login?: string }
       interval += 5000
     } else if (body.error && body.error !== "authorization_pending") {
       throw new Error(
-        `device flow 실패: ${body.error} ${body.error_description ?? ""}`,
+        `device flow failed: ${body.error} ${body.error_description ?? ""}`,
       )
     }
   }
-  throw new Error("device flow 시간 초과")
+  throw new Error("device flow timed out")
 }

@@ -65,17 +65,17 @@ async function fetchCopilotToken(): Promise<string> {
     githubToken = null
     cached = null
     throw new Error(
-      "GitHub 토큰이 거부됐습니다 — `clco auth`로 재인증하세요",
+      "GitHub token was rejected - re-authenticate with `clco auth`",
     )
   }
   if (!res.ok) {
     throw new Error(
-      `Copilot 토큰 발급 실패: HTTP ${res.status} (Copilot 구독이 활성화되어 있는지 확인하세요)`,
+      `Copilot token exchange failed: HTTP ${res.status} (check that your Copilot subscription is active)`,
     )
   }
   const data = (await res.json()) as CopilotTokenResponse
   if (typeof data.expires_at !== "number" || !Number.isFinite(data.expires_at)) {
-    throw new Error("Copilot 토큰 응답에 expires_at이 없습니다")
+    throw new Error("Copilot token response has no expires_at")
   }
   cached = { token: data.token, expiresAt: data.expires_at * 1000 }
   setCopilotBase(data.endpoints?.api ?? null)
@@ -279,8 +279,8 @@ export async function discoverModels(): Promise<ModelMapping> {
   // Reported by the caller after any progress spinner has stopped; printing
   // here would be painted over by the spinner that wraps this call.
   softFailure =
-    `[clco] Copilot /models 감지 실패 (${copilotBaseUrl()}${reason ? `: ${reason}` : ""})` +
-    ` — 기본 슬러그 사용 (CLCO_OPUS/SONNET/HAIKU로 지정 가능)`
+    `[clco] Copilot /models discovery failed (${copilotBaseUrl()}${reason ? `: ${reason}` : ""})` +
+    ` - falling back to default slugs (override with CLCO_OPUS/SONNET/HAIKU)`
   return {
     opus: overrides.opus ?? FALLBACK_MODELS.opus,
     sonnet: overrides.sonnet ?? FALLBACK_MODELS.sonnet,

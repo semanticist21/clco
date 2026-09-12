@@ -28,8 +28,8 @@ describe("parseArgs", () => {
   })
 
   test("bare typos fail with the command list", () => {
-    expect(() => parseArgs(["updaet"])).toThrow(/알 수 없는 명령/)
-    expect(() => parseArgs(["serve", "oops"])).toThrow(/알 수 없는 명령/)
+    expect(() => parseArgs(["updaet"])).toThrow(/unknown command/)
+    expect(() => parseArgs(["serve", "oops"])).toThrow(/unknown command/)
   })
 
   test("the launcher sentinel and -- both hand everything to claude", () => {

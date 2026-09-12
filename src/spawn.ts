@@ -103,7 +103,7 @@ export async function resolveClaude(): Promise<string> {
   const candidate = Bun.which("claude") ?? `${homedir()}/.local/bin/claude`
   if (!(await Bun.file(candidate).exists())) {
     throw new Error(
-      `claude 실행 파일을 찾을 수 없습니다: ${candidate} (PATH 또는 ~/.local/bin 확인)`,
+      `claude executable not found: ${candidate} (check PATH or ~/.local/bin)`,
     )
   }
   resolvedClaude = candidate
@@ -213,13 +213,13 @@ export function buildModelPickerFrom(
     if (ctx) parts.push(`${Math.round(ctx / 1000)}k`)
     // Claude offers effort tiers to any row with behavesAs; say so where the
     // upstream model will just ignore them.
-    if (!m.efforts) parts.push("effort 없음")
+    if (!m.efforts) parts.push("no effort tiers")
     // Only the shrinking direction is a hazard: the session's auto-compact
     // budget is fixed at launch, so a smaller model can sail past its real
     // limit. A larger one merely leaves headroom unused. Warning on both
     // would mark nearly every row and stop meaning anything.
     if (ctx && opts?.sessionWindow && ctx < opts.sessionWindow) {
-      parts.push(`⚠한도 ${Math.round(ctx / 1000)}k`)
+      parts.push(`! caps at ${Math.round(ctx / 1000)}k`)
     }
     options.push({
       model: (advertised ?? m.id) + suffix,

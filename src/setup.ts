@@ -14,21 +14,26 @@ export interface SetupOverrides {
   select?: boolean
 }
 
-const DEFAULTS: Omit<SetupPrefs, "version"> = {
-  bypass: false,
-  chrome: false,
-  select: false,
+// What the first-run prompts come pre-filled with: these are the options
+// people install clco for, so Enter-through should land on the useful setup.
+// A future option added to an EXISTING setup is absent from the stored
+// object, i.e. off, which is the conservative direction for a change nobody
+// asked for.
+export const DEFAULTS_FOR_TESTS: Omit<SetupPrefs, "version"> = {
+  bypass: true,
+  chrome: true,
+  select: true,
 }
 
 export async function runSetup(): Promise<SetupPrefs> {
   const prefs = await loadPrefs()
-  const current = prefs.setup ?? { ...DEFAULTS, version: SETUP_VERSION }
+  const current = prefs.setup ?? { ...DEFAULTS_FOR_TESTS, version: SETUP_VERSION }
 
-  p.intro("clco 설정 — 매번 붙이던 옵션을 기본값으로 저장합니다")
+  p.intro("clco setup - save the flags you would otherwise type every run")
   const ask = async (message: string, initialValue: boolean): Promise<boolean> => {
     const answer = await p.confirm({ message, initialValue })
     if (p.isCancel(answer)) {
-      p.cancel("취소됨 — 기존 설정을 유지합니다")
+      p.cancel("Cancelled - keeping the previous settings")
       process.exit(0)
     }
     return answer as boolean
@@ -37,15 +42,19 @@ export async function runSetup(): Promise<SetupPrefs> {
   const setup: SetupPrefs = {
     version: SETUP_VERSION,
     bypass: await ask(
-      "권한 확인 없이 실행할까요? (--dangerously-skip-permissions)",
+      "Run without permission prompts? (--dangerously-skip-permissions)",
       current.bypass,
     ),
-    chrome: await ask("Chrome 연동을 켤까요? (--chrome)", current.chrome),
-    select: await ask("시작할 때 모델을 고를까요?", current.select),
+    chrome: await ask(
+      "Pass --chrome? (the extension needs a claude.ai login, so it stays\n" +
+      "  disabled on a Copilot backend - a browser MCP server works instead)",
+      current.chrome,
+    ),
+    select: await ask("Pick a model each time clco starts?", current.select),
   }
 
   await savePrefs({ ...prefs, setup })
-  p.outro("저장했습니다 — 바꾸려면 `clco setup`, 이번만 끄려면 --no-bypass / --no-chrome / --no-select")
+  p.outro("Saved. Change it with `clco setup`; turn one off for a single run with --no-bypass / --no-chrome / --no-select")
   return setup
 }
 
@@ -59,7 +68,7 @@ export async function loadSetup(): Promise<SetupPrefs | null> {
   if (!prefs.setup) return null
   if (prefs.setup.version < SETUP_VERSION) {
     console.error(
-      "[clco] 새 설정 항목이 있습니다 (기본값 off) — 켜려면 `clco setup`",
+      "[clco] New setup options are available (off by default) - run `clco setup` to enable them",
     )
     // Record that the notice was shown; the options themselves stay off.
     await savePrefs({

@@ -34,7 +34,7 @@ Bun.serve({
 
     if (url.pathname === "/v1/messages") {
       const body = (await req.json()) as { stream?: boolean; model: string }
-      const text = "Mock native 응답: 정상 동작"
+      const text = "Mock native response: OK"
       if (body.stream) {
         return new Response(
           [
@@ -101,7 +101,7 @@ Bun.serve({
     if (body.stream) {
       return new Response(
         [
-          chunk({ role: "assistant", content: "Mock upstream 응답: 정상 동작" }),
+          chunk({ role: "assistant", content: "Mock upstream response: OK" }),
           chunk({}, "stop"),
           "data: [DONE]\n\n",
         ].join(""),
@@ -115,7 +115,7 @@ Bun.serve({
         {
           index: 0,
           finish_reason: "stop",
-          message: { role: "assistant", content: "Mock upstream 응답: 정상 동작" },
+          message: { role: "assistant", content: "Mock upstream response: OK" },
         },
       ],
       usage: { prompt_tokens: 5, completion_tokens: 3 },

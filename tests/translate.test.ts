@@ -171,7 +171,7 @@ describe("translateRequest", () => {
     const tool = out.messages[0] as { role: string; content: unknown }
     expect(tool.role).toBe("tool")
     expect(typeof tool.content).toBe("string")
-    expect(tool.content).toContain("[이미지 1개")
+    expect(tool.content).toContain("[1 image(s)")
     const user = out.messages[1] as unknown as {
       role: string
       content: Array<Record<string, unknown>>

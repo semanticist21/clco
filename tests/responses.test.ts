@@ -134,7 +134,7 @@ describe("ResponsesEventAdapter", () => {
     expect(out.input[0]).toEqual({
       type: "function_call_output",
       call_id: "t1",
-      output: "shot:\n\n[이미지 1개 — 다음 사용자 메시지에 첨부됨]",
+      output: "shot:\n\n[1 image(s) - attached to the next user message]",
     })
     expect(out.input[1]).toEqual({
       role: "user",

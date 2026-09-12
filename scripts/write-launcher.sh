@@ -9,7 +9,7 @@ set -euo pipefail
 CLCO_DIR="${1:?app dir required}"
 BIN_DIR="${2:?bin dir required}"
 BUN_BIN="${3:-$(command -v bun)}"
-[ -n "$BUN_BIN" ] || { echo "bun을 찾을 수 없습니다" >&2; exit 1; }
+[ -n "$BUN_BIN" ] || { echo "bun not found" >&2; exit 1; }
 
 # Bump when the launcher body changes; clco compares it to warn about a stale
 # launcher that predates a feature.

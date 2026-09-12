@@ -58,3 +58,15 @@ describe("shouldSelectModel", () => {
     expect(shouldSelectModel(null, {})).toBe(true)
   })
 })
+
+describe("defaults", () => {
+  // The flags people install clco for; Enter-through should land on them.
+  test("first-run prompts come pre-filled with yes", async () => {
+    const { DEFAULTS_FOR_TESTS } = await import("../src/setup")
+    expect(DEFAULTS_FOR_TESTS).toEqual({
+      bypass: true,
+      chrome: true,
+      select: true,
+    })
+  })
+})

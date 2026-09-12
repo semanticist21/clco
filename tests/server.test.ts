@@ -405,7 +405,7 @@ describe("adapter server", () => {
     // quota_exceeded gets the actionable guidance message.
     const err = events[errorIdx]!.data.error as Record<string, unknown>
     expect(err.type).toBe("invalid_request_error")
-    expect(err.message).toContain("Copilot 월간 premium quota")
+    expect(err.message).toContain("Copilot monthly premium quota")
     // Error is terminal: no fake message_stop after it.
     expect(events.slice(errorIdx).map((e) => e.name)).not.toContain("message_stop")
   })
@@ -419,7 +419,7 @@ describe("adapter server", () => {
     expect(res.status).toBe(402)
     const body = (await res.json()) as { error: { type: string; message: string } }
     expect(body.error.type).toBe("invalid_request_error")
-    expect(body.error.message).toContain("Copilot 월간 premium quota")
+    expect(body.error.message).toContain("Copilot monthly premium quota")
   })
 
   test("spoofed Host header is rejected (403)", async () => {

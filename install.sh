@@ -8,21 +8,21 @@ CLCO_DIR="${CLCO_DIR:-$HOME/.local/share/clco}"
 BIN_DIR="${BIN_DIR:-$HOME/.local/bin}"
 
 log() { printf '\033[1;36m==>\033[0m %s\n' "$*"; }
-fail() { printf '\033[1;31m오류:\033[0m %s\n' "$*" >&2; exit 1; }
+fail() { printf '\033[1;31mError:\033[0m %s\n' "$*" >&2; exit 1; }
 
-command -v git >/dev/null 2>&1 || fail "git이 필요합니다 — 먼저 설치해 주세요"
+command -v git >/dev/null 2>&1 || fail "git is required - please install it first"
 
 # --- Bun (auto-install when missing) ---------------------------------------
 if ! command -v bun >/dev/null 2>&1; then
-  log "Bun이 없어서 공식 설치 스크립트로 설치합니다"
+  log "Bun not found - installing it with the official script"
   curl -fsSL https://bun.sh/install | bash
   export PATH="$HOME/.bun/bin:$PATH"
-  command -v bun >/dev/null 2>&1 || fail "Bun 설치 확인 실패 — 터미널을 다시 열고 재실행해 주세요"
+  command -v bun >/dev/null 2>&1 || fail "Could not verify the Bun install - reopen your terminal and retry"
 fi
 
 # --- Source ------------------------------------------------------------------
 if [ -d "$CLCO_DIR/.git" ]; then
-  log "기존 설치 업데이트: $CLCO_DIR"
+  log "Updating the existing install: $CLCO_DIR"
   # Pre-rename clones carry a stale origin — retarget before pulling.
   CURRENT_URL="$(git -C "$CLCO_DIR" remote get-url origin 2>/dev/null || true)"
   case "$CURRENT_URL" in
@@ -31,39 +31,39 @@ if [ -d "$CLCO_DIR/.git" ]; then
       [ -n "$CURRENT_URL" ] && git -C "$CLCO_DIR" remote set-url origin "$REPO"
       ;;
   esac
-  git -C "$CLCO_DIR" pull --ff-only >/dev/null 2>&1 || fail "업데이트 실패 — $CLCO_DIR에서 git pull을 직접 확인해 주세요"
+  git -C "$CLCO_DIR" pull --ff-only >/dev/null 2>&1 || fail "Update failed - run git pull in $CLCO_DIR to see why"
 else
-  [ -e "$CLCO_DIR" ] && fail "$CLCO_DIR 가 이미 있고 git 저장소가 아닙니다 — 지우고 재실행하세요"
-  log "저장소 클론: $CLCO_DIR"
+  [ -e "$CLCO_DIR" ] && fail "$CLCO_DIR already exists and is not a git repo - remove it and retry"
+  log "Cloning into $CLCO_DIR"
   git clone --depth 1 "$REPO" "$CLCO_DIR"
 fi
 
-log "의존성 설치 (bun install)"
+log "Installing dependencies (bun install)"
 (cd "$CLCO_DIR" && bun install --frozen-lockfile >/dev/null 2>&1) \
   || (cd "$CLCO_DIR" && bun install >/dev/null 2>&1) \
-  || { log "bun install 실패 — 상세 출력:"; (cd "$CLCO_DIR" && bun install) || fail "bun install 실패"; }
+  || { log "bun install failed - full output:"; (cd "$CLCO_DIR" && bun install) || fail "bun install failed"; }
 
 # --- claude CLI (required by clco; offer to install) -------------------------
-CLAUDE_WARN="나중에 설치: curl -fsSL https://claude.ai/install.sh | bash"
+CLAUDE_WARN="Install it later with: curl -fsSL https://claude.ai/install.sh | bash"
 if command -v claude >/dev/null 2>&1; then
-  log "claude CLI 확인"
+  log "Found the claude CLI"
 else
-  log "claude CLI가 없습니다 (clco 실행에 필수)"
+  log "The claude CLI is missing (clco needs it)"
   INSTALL_CLAUDE=n
   if [ -e /dev/tty ]; then
-    printf '지금 설치할까요? [y/N] '
+    printf 'Install it now? [y/N] '
     answer=n
     read -r answer < /dev/tty || answer=n
     case "$answer" in y|Y|yes|Yes) INSTALL_CLAUDE=y ;; esac
   fi
   if [ "$INSTALL_CLAUDE" = y ]; then
-    log "claude CLI 설치 중 (공식 설치 스크립트)"
+    log "Installing the claude CLI (official script)"
     curl -fsSL https://claude.ai/install.sh | bash
     export PATH="$HOME/.local/bin:$PATH"
     command -v claude >/dev/null 2>&1 \
-      || log "⚠ claude 설치 확인 실패 — 터미널을 다시 열고 확인하세요. $CLAUDE_WARN"
+      || log "! Could not verify the claude install - reopen your terminal and check. $CLAUDE_WARN"
   else
-    log "⚠ 건너뜀 — clco 실행 전에 claude CLI가 필요합니다. $CLAUDE_WARN"
+    log "! Skipped - clco needs the claude CLI before it can run. $CLAUDE_WARN"
   fi
 fi
 
@@ -75,8 +75,8 @@ bash "$CLCO_DIR/scripts/write-launcher.sh" "$CLCO_DIR" "$BIN_DIR"
 
 case ":$PATH:" in
   *":$BIN_DIR:"*) ;;
-  *) printf '\033[1;33m참고:\033[0m %s 가 PATH에 없습니다. ~/.zshrc 등에 추가하세요:\n  export PATH="%s:$PATH"\n' "$BIN_DIR" "$BIN_DIR" ;;
+  *) printf '\033[1;33mNote:\033[0m %s is not on your PATH. Add it to ~/.zshrc or similar:\n  export PATH="%s:$PATH"\n' "$BIN_DIR" "$BIN_DIR" ;;
 esac
 
-log "설치 완료: $BIN_DIR/clco"
-printf '\n시작하기:\n  clco          ← 첫 실행 시 GitHub 로그인(device flow) → 모델 선택 → claude 실행\n  clco --help   ← 전체 사용법\n\n제거:\n  curl -fsSL https://raw.githubusercontent.com/semanticist21/clco/main/uninstall.sh | bash\n'
+log "Installed: $BIN_DIR/clco"
+printf '\nGetting started:\n  clco          first run: GitHub device login, pick a model, launch claude\n  clco setup    set your startup defaults\n  clco --help   full usage\n\nUninstall:\n  curl -fsSL https://raw.githubusercontent.com/semanticist21/clco/main/uninstall.sh | bash\n'

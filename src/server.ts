@@ -54,7 +54,7 @@ const LOCAL_TOKEN = "clco-local"
 const MAX_BODY_BYTES = 64 * 1024 * 1024
 
 const QUOTA_GUIDANCE =
-  "Copilot 월간 premium quota 초과 또는 구독 없음 — github.com/settings/copilot에서 확인하세요"
+  "Copilot monthly premium quota exhausted, or no subscription - check github.com/settings/copilot"
 
 // clco appends [1m] to picker rows whose real window exceeds the default
 // ceiling, which makes Claude Code request the 1M-context beta. Forward that
@@ -460,9 +460,9 @@ async function handleMessages(
       )
       return anthropicError(
         400,
-        `${payload.model}의 입력 한도(${limit.toLocaleString()} 토큰)를 넘었습니다 ` +
-          `(현재 약 ${estimate.toLocaleString()}). /compact 하거나 ` +
-          `/model에서 컨텍스트가 더 큰 모델로 바꾸세요.`,
+        `${payload.model} accepts ${limit.toLocaleString()} input tokens, ` +
+          `this conversation is about ${estimate.toLocaleString()}. ` +
+          `Run /compact, or pick a model with a bigger context in /model.`,
       )
     }
   }

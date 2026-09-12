@@ -35,7 +35,7 @@ export function caBundle(): string[] | undefined {
       extra.push(readFileSync(path, "utf8"))
     } catch (err) {
       console.error(
-        `[clco] CA 번들을 읽지 못했습니다: ${path} (${err instanceof Error ? err.message : String(err)})`,
+        `[clco] could not read CA bundle: ${path} (${err instanceof Error ? err.message : String(err)})`,
       )
     }
   }
@@ -62,10 +62,12 @@ export function isTlsTrustError(message: string): boolean {
 // Ordered by what is actually verified to work on Bun. NODE_USE_SYSTEM_CA
 // used to lead this list and does nothing.
 export const TLS_HINT =
-  "\n사내 프록시가 TLS를 다시 서명하는 환경으로 보입니다:\n" +
-  "  1) 회사 CA를 파일로 받아  CLCO_CA_BUNDLE=/path/ca.pem clco ...\n" +
-  "     (OS 신뢰저장소에 '추가'합니다 — 교체가 아니라 안전합니다)\n" +
-  '  2) macOS 키체인에서 내보내기: security find-certificate -a -p -c "<CA 이름>" > ca.pem\n' +
-  "  3) NODE_EXTRA_CA_CERTS는 macOS에서 시스템 저장소를 '대체'해 멀쩡하던 신뢰까지\n" +
-  "     깨뜨린 사례가 있습니다 — 1)이 안 될 때만 쓰세요.\n" +
-  "TLS 검증을 끄는 방법은 쓰지 마세요 — GitHub 토큰이 그대로 노출됩니다."
+  "\nThis looks like a corporate proxy re-signing TLS. To fix it:\n" +
+  "  1) Get your company CA as a file, then:\n" +
+  "       CLCO_CA_BUNDLE=/path/ca.pem clco ...\n" +
+  "     It is ADDED to the OS trust store, never replaces it.\n" +
+  '  2) Export it from the macOS keychain:\n' +
+  '       security find-certificate -a -p -c "<CA name>" > ca.pem\n' +
+  "  3) NODE_EXTRA_CA_CERTS has been reported to REPLACE the system store on\n" +
+  "     macOS and break trust that already worked - use it only if 1) fails.\n" +
+  "Never disable TLS verification: your GitHub token goes over that connection."

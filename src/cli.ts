@@ -34,32 +34,33 @@ import {
 } from "./setup"
 import { normalizeModel } from "./translate"
 
-const HELP = `clco — GitHub Copilot 구독으로 Claude Code 실행
+const HELP = `clco — run Claude Code on your GitHub Copilot subscription
 
-사용법:
-  clco [--port N] [claude 인자...]
-      GitHub 인증(최초 1회) → 모델 선택 → 로컬 어댑터 기동 → claude 실행.
-      clco가 모르는 대시 인자는 claude로 그대로 전달됩니다:
-        clco --chrome / clco --dangerously-skip-permissions / clco -p "질문"
-      모델 선택 프롬프트는 -p(무인 실행)와 비대화 환경에서만 생략됩니다.
+Usage:
+  clco [--port N] [claude args...]
+      GitHub auth (first run only) -> pick a model -> start the local
+      adapter -> launch claude. Any dashed argument clco does not own is
+      passed straight through:
+        clco --chrome / clco --dangerously-skip-permissions / clco -p "ask"
+      The model prompt is skipped for -p and in non-interactive shells.
   clco serve [--port N]
-      어댑터 서버만 기동 (claude는 직접 연결해서 사용)
+      Run only the adapter; point your own claude at it
   clco status
-      계정·플랜·모델별 경로/권한/컨텍스트 확인
+      Show the account, plan, and each model's route/policy/context
   clco login
-      GitHub device flow (재)인증 — 계정 전환도 이걸로
+      (Re)authenticate via GitHub device flow; also switches accounts
   clco logout
-      저장된 GitHub 토큰 삭제
+      Delete the stored GitHub token
   clco update
-      설치된 clco를 저장소 최신 버전으로 갱신 (git pull + 의존성)
+      Update this install to the latest revision (git pull + deps)
   clco help
 
-환경변수:
-  CLCO_UPSTREAM           업스트림 베이스 URL 오버라이드 (목업 테스트용, 인증 생략)
-  CLCO_OPUS/SONNET/HAIKU  모델 슬러그 오버라이드
-  CLCO_NO_SELECT=1        모델 선택 프롬프트 생략
-  CLCO_NO_PASSTHROUGH=1   네이티브 /v1/messages 경로 비활성화 (항상 번역)
-  CLCO_EDITOR_VERSION / CLCO_CHAT_VERSION  클라이언트 식별 버전 오버라이드
+Environment:
+  CLCO_UPSTREAM           Override the upstream base URL (mock testing; skips auth)
+  CLCO_OPUS/SONNET/HAIKU  Override the model slug for a slot
+  CLCO_NO_SELECT=1        Skip the startup model prompt
+  CLCO_NO_PASSTHROUGH=1   Disable the native /v1/messages route (always translate)
+  CLCO_EDITOR_VERSION / CLCO_CHAT_VERSION  Override the client identity versions
 `
 
 interface Args {
@@ -75,21 +76,21 @@ interface Args {
 // Our own vocabulary is tiny (serve/auth/login/logout/update/--port/help).
 // Anything else before `--` is a typo — fail loudly with the command list
 // instead of silently launching a conversation. claude args go after `--`.
-const COMMAND_LIST = `명령어:
-  clco                 대화 실행 (모델 선택 프롬프트)
-  clco serve           어댑터 서버만 기동
-  clco login|auth      GitHub (재)인증
-  clco logout          저장된 토큰 삭제
-  clco update          최신 버전으로 갱신
-  clco status          계정·모델 권한·엔드포인트 확인
-  clco setup           시작 옵션(권한·chrome·모델선택) 기본값 설정
-  clco --port N        어댑터 포트 고정
-  clco --no-bypass     이번 실행만 권한 확인 켜기
-  clco --no-chrome     이번 실행만 chrome 끄기
-  clco --no-select     이번 실행만 모델 선택 건너뛰기
-  clco help            도움말
+const COMMAND_LIST = `Commands:
+  clco                 Start a session (prompts for a model)
+  clco serve           Run only the adapter
+  clco login|auth      (Re)authenticate with GitHub
+  clco logout          Delete the stored token
+  clco update          Update to the latest revision
+  clco status          Show account, model policy, and routing
+  clco setup           Set startup defaults (permissions, chrome, model prompt)
+  clco --port N        Pin the adapter port
+  clco --no-bypass     Re-enable permission prompts for this run
+  clco --no-chrome     Disable chrome for this run
+  clco --no-select     Skip the model prompt for this run
+  clco help            Show this help
 
-claude 인자는 그대로 전달됩니다:  clco -p "질문"  /  clco --chrome  /  clco --dangerously-skip-permissions`
+claude args pass through:  clco -p "ask"  /  clco --chrome  /  clco --dangerously-skip-permissions`
 
 export function parseArgs(rawArgv: string[]): Args {
   // The launcher replaces a leading "--" with this sentinel because bun
@@ -120,7 +121,7 @@ export function parseArgs(rawArgv: string[]): Args {
       const raw = leading[i + 1]
       const n = Number(raw)
       if (raw === undefined || !Number.isInteger(n) || n <= 0) {
-        throw new Error(`--port 에는 1 이상의 정수가 필요합니다\n\n${COMMAND_LIST}`)
+        throw new Error(`--port needs a positive integer\n\n${COMMAND_LIST}`)
       }
       port = n
       i += 2
@@ -143,7 +144,7 @@ export function parseArgs(rawArgv: string[]): Args {
       return { command, port, overrides, claudeArgs: [...leading.slice(i), ...trailing] }
     }
     throw new Error(
-      `알 수 없는 명령: "${arg}"\n(claude 인자라면 -- 뒤에 넣으세요: clco -- ${leading.slice(i).join(" ")})\n\n${COMMAND_LIST}`,
+      `unknown command: "${arg}"\n(for a claude argument, put it after --: clco -- ${leading.slice(i).join(" ")})\n\n${COMMAND_LIST}`,
     )
   }
   return { command, port, overrides, claudeArgs: trailing }
@@ -165,7 +166,7 @@ async function step<T>(name: string, fn: () => Promise<T>): Promise<T> {
       spinner.stop(`${name} ✓ ${seconds(Date.now() - t0)}`)
       return value
     } catch (err) {
-      spinner.stop(`${name} 실패 (${seconds(Date.now() - t0)})`)
+      spinner.stop(`${name} failed (${seconds(Date.now() - t0)})`)
       throw err
     }
   } else {
@@ -191,10 +192,10 @@ async function runUpdate(): Promise<void> {
   const dir = appDir()
   if (!dir) {
     throw new Error(
-      "업데이트할 설치를 찾지 못했습니다 (설치 디렉토리 또는 git 저장소 필요)",
+      "no installation to update (need an install directory or git repo)",
     )
   }
-  console.error(`… 업데이트: ${dir}`)
+  console.error(`... updating: ${dir}`)
   // Pre-rename clones carry a stale origin — retarget before pulling.
   const CANONICAL = "https://github.com/semanticist21/clco.git"
   const remote = Bun.spawnSync(["git", "-C", dir, "remote", "get-url", "origin"], {
@@ -203,7 +204,7 @@ async function runUpdate(): Promise<void> {
   })
   const url = remote.stdout.toString().trim()
   if (remote.exitCode === 0 && url && !url.endsWith("semanticist21/clco.git")) {
-    console.error(`… origin 재지정: ${url} → ${CANONICAL}`)
+    console.error(`... retargeting origin: ${url} -> ${CANONICAL}`)
     Bun.spawnSync(["git", "-C", dir, "remote", "set-url", "origin", CANONICAL])
   }
   const pull = Bun.spawnSync(["git", "-C", dir, "pull", "--ff-only"], {
@@ -212,7 +213,7 @@ async function runUpdate(): Promise<void> {
   })
   if (pull.exitCode !== 0) {
     throw new Error(
-      `git pull 실패: ${pull.stderr.toString().trim() || pull.stdout.toString().trim()}`,
+      `git pull failed: ${pull.stderr.toString().trim() || pull.stdout.toString().trim()}`,
     )
   }
   const inst = Bun.spawnSync(["bun", "install"], {
@@ -220,7 +221,7 @@ async function runUpdate(): Promise<void> {
     stdout: "pipe",
     stderr: "pipe",
   })
-  if (inst.exitCode !== 0) throw new Error("bun install 실패")
+  if (inst.exitCode !== 0) throw new Error("bun install failed")
   // Refresh the launcher too. It used to be baked once by install.sh, so an
   // existing install never picked up launcher changes no matter how often it
   // updated.
@@ -230,16 +231,16 @@ async function runUpdate(): Promise<void> {
     { stdout: "pipe", stderr: "pipe" },
   )
   if (launcher.exitCode === 0) {
-    console.error(`… 런처 갱신: ${join(binDir, "clco")}`)
+    console.error(`... launcher updated: ${join(binDir, "clco")}`)
   } else {
     console.error(
-      `⚠ 런처 갱신 실패 — install.sh를 다시 실행하세요 (${launcher.stderr.toString().trim()})`,
+      `! launcher update failed - re-run install.sh (${launcher.stderr.toString().trim()})`,
     )
   }
   const head = Bun.spawnSync(["git", "-C", dir, "rev-parse", "--short", "HEAD"], {
     stdout: "pipe",
   })
-  console.error(`✓ 업데이트 완료 (${head.stdout.toString().trim()}) — 다음 실행부터 적용`)
+  console.error(`+ updated (${head.stdout.toString().trim()}) - applies from the next run`)
 }
 
 // Show what this account can actually reach: which models are enabled, which
@@ -264,18 +265,18 @@ async function runStatus(): Promise<void> {
           await saveAuth({ github_token: identity.token, login }).catch(() => {})
         }
       } else {
-        lookupNote = `조회 거부됨 (HTTP ${res.status})`
+        lookupNote = `lookup refused (HTTP ${res.status})`
       }
     } catch (err) {
-      lookupNote = `조회 실패 (${err instanceof Error ? err.message : String(err)})`
+      lookupNote = `lookup failed (${err instanceof Error ? err.message : String(err)})`
     }
   }
   console.log(
-    `계정: ${login ? `@${login}` : `(로그인됨${lookupNote ? ` — 계정명 ${lookupNote}` : ""})`}`,
+    `Account: ${login ? `@${login}` : `(signed in${lookupNote ? ` - username ${lookupNote}` : ""})`}`,
   )
 
   const facts = await copilotTokenFacts().catch(() => ({}) as { sku?: string })
-  if (facts.sku) console.log(`플랜: ${facts.sku}`)
+  if (facts.sku) console.log(`Plan: ${facts.sku}`)
   await discoverModels()
   // Populates the model catalog from the installed binary so the /model
   // preview below matches what a real session would offer. Diagnostics must
@@ -285,7 +286,7 @@ async function runStatus(): Promise<void> {
   if (discoveryNote) console.error(discoveryNote)
   const models = upstreamModels()
   if (models.length === 0) {
-    console.log("모델 목록을 가져오지 못했습니다 (네트워크 또는 구독 확인)")
+    console.log("Could not fetch the model list (check your network or subscription)")
     return
   }
   const route = (m: (typeof models)[number]) =>
@@ -301,8 +302,8 @@ async function runStatus(): Promise<void> {
     (picker?.options ?? []).map((o) => [normalizeModel(o.model), o] as const),
   )
   console.log(
-    `\n${"모델".padEnd(26)} ${"/model 표기".padEnd(38)} ${"경로".padEnd(10)} ` +
-      `${"정책".padEnd(10)} ${"컨텍스트".padEnd(10)} effort`,
+    `\n${"model".padEnd(26)} ${"shown in /model".padEnd(38)} ${"route".padEnd(10)} ` +
+      `${"policy".padEnd(10)} ${"context".padEnd(10)} effort`,
   )
   for (const m of models) {
     const row = offered.get(m.id)
@@ -317,36 +318,58 @@ async function runStatus(): Promise<void> {
     )
   }
   console.log(
-    `\n/model 행 ${picker?.options.length ?? 0}개 / 업스트림 ${models.length}개`,
+    `\n${picker?.options.length ?? 0} rows in /model, ${models.length} models upstream`,
   )
   await reportClaudeInstallNotes()
   console.log(
-    "\nquota는 실제 요청 시점에만 확인됩니다 (Copilot에 사전 조회 API가 없음).\n" +
-      "소진 시 402와 함께 안내가 표시됩니다.",
+    "\nQuota is only known at request time - Copilot has no API to check it\n" +
+      "up front. When it runs out you get a 402 with the details.",
   )
 }
 
 // Things in the user's own claude install that change what clco's lineup
 // does, plus leftovers older clco versions wrote there.
+// Claude Code gates the Chrome extension on the OAuth scope of the session:
+// "[Claude in Chrome] Disabled: OAuth token has no scope accepted by
+// /api/oauth/validate (needs user:profile, user:office, or user:ccr_inference;
+// env-var and setup-token sessions default to user:inference only)". clco
+// authenticates with ANTHROPIC_AUTH_TOKEN against its own adapter, so it is
+// always an env-var session and the browser tools are never registered —
+// measured: mcp__claude-in-chrome__* appears in zero requests. Say so, rather
+// than letting --chrome look like it did something.
+async function reportChromeCaveat(): Promise<void> {
+  const prefs = await loadPrefs().catch(() => ({}) as Awaited<ReturnType<typeof loadPrefs>>)
+  if (!prefs.setup?.chrome) return
+  console.log(
+    "\nNote: --chrome is on, but the Claude Chrome extension needs a claude.ai\n" +
+      "  login and stays disabled on a Copilot backend. Use a browser MCP server\n" +
+      "  (playwright, chrome-devtools, puppeteer) instead - MCP works normally.",
+  )
+}
+
 /** Matches LAUNCHER_VERSION in scripts/write-launcher.sh. */
 const LAUNCHER_VERSION = 2
 
 function reportStaleLauncher(): void {
+  // CLCO_APP_DIR is set by every launcher; without it clco was started
+  // directly (bun run src/cli.ts), where there is no launcher to be stale.
+  if (!process.env.CLCO_APP_DIR) return
   const running = Number(process.env.CLCO_LAUNCHER_VERSION ?? "0")
   if (running >= LAUNCHER_VERSION) return
   console.log(
-    `\n참고: ~/.local/bin/clco 런처가 낡았습니다 (v${running || "?"} < v${LAUNCHER_VERSION}).` +
-      " `clco update` 또는 install.sh 재실행으로 갱신하세요.",
+    `\nNote: the ~/.local/bin/clco launcher is out of date (v${running || "?"} < v${LAUNCHER_VERSION}).` +
+      " Refresh it with `clco update`, or by re-running install.sh.",
   )
 }
 
 async function reportClaudeInstallNotes(): Promise<void> {
   reportStaleLauncher()
+  await reportChromeCaveat()
   const home = homedir()
   const stale = join(home, ".claude", "cache", "gateway-models.json")
   if (await Bun.file(stale).exists()) {
     console.log(
-      `\n참고: ${stale} 는 이전 버전 clco가 남긴 것입니다 — 지워도 됩니다.`,
+      `\nNote: ${stale} is left over from an older clco - safe to delete.`,
     )
   }
   try {
@@ -355,12 +378,12 @@ async function reportClaudeInstallNotes(): Promise<void> {
     // Both outrank or filter what --settings injects.
     if (parsed.availableModels) {
       console.log(
-        "경고: ~/.claude/settings.json의 availableModels가 clco의 /model 행을 걸러냅니다.",
+        "Warning: availableModels in ~/.claude/settings.json filters clco's /model rows.",
       )
     }
     if (parsed.modelPicker) {
       console.log(
-        "참고: ~/.claude/settings.json에 modelPicker가 있습니다 — clco의 --settings가 우선하며 병합되지 않습니다.",
+        "Note: ~/.claude/settings.json defines modelPicker - clco's --settings wins outright; the two are not merged.",
       )
     }
   } catch {
@@ -399,21 +422,21 @@ async function main(): Promise<void> {
 
   if (args.command === "logout") {
     await clearAuth()
-    console.log("✓ 로그아웃 — ~/.config/clco/auth.json 삭제. 다시 로그인: clco login")
+    console.log("+ Signed out - removed ~/.config/clco/auth.json. Sign in again: clco login")
     return
   }
 
   if (args.command === "auth" || args.command === "login") {
     if (args.port !== undefined) {
-      console.error(`[clco] ${args.command} 모드에서는 --port가 무시됩니다`)
+      console.error(`[clco] --port is ignored in ${args.command} mode`)
     }
     if (isMockMode()) {
-      console.log("목업 모드 (CLCO_UPSTREAM) — 인증 생략")
+      console.log("Mock mode (CLCO_UPSTREAM) - skipping auth")
       return
     }
     const { token, login } = await runDeviceFlow()
     console.log(
-      `✓ GitHub 인증 완료${login ? ` (@${login})` : ""} — ~/.config/clco/auth.json 저장`,
+      `+ GitHub authenticated${login ? ` (@${login})` : ""} - saved to ~/.config/clco/auth.json`,
     )
     if (process.env.CLCO_DEBUG) {
       console.error(`[clco:debug] token prefix: ${token.slice(0, 4)}…`)
@@ -427,12 +450,12 @@ async function main(): Promise<void> {
     )
   ) {
     throw new Error(
-      "--settings는 clco이 주입합니다 — 직접 지정하면 어댑터 우회 설정을 덮어쓰게 됩니다",
+      "--settings is injected by clco; passing your own would overwrite the adapter routing",
     )
   }
   if (args.command === "serve" && args.claudeArgs.length > 0) {
     throw new Error(
-      `serve 모드에서는 claude 인자를 줄 수 없습니다: ${args.claudeArgs.join(" ")}`,
+      `serve mode takes no claude arguments: ${args.claudeArgs.join(" ")}`,
     )
   }
 
@@ -444,16 +467,16 @@ async function main(): Promise<void> {
 
   if (isMockMode()) {
     console.error(
-      `⚠ 목업 모드: CLCO_UPSTREAM=${process.env.CLCO_UPSTREAM}\n` +
-        `  모든 요청이 이 주소로 전송되며 GitHub 인증을 건너뜁니다. 실제 사용 시 이 환경변수를 해제하세요.`,
+      `! Mock mode: CLCO_UPSTREAM=${process.env.CLCO_UPSTREAM}\n` +
+        `  Every request goes there and GitHub auth is skipped. Unset it for real use.`,
     )
   }
 
-  await step("GitHub 토큰 확인", async () => {
+  await step("Checking GitHub token", async () => {
     const identity = await ensureGithubToken()
     if (identity.fresh && !isMockMode()) {
       console.error(
-        `  └ 신규 인증: @${identity.login ?? "unknown"} — ~/.config/clco/auth.json 저장`,
+        `  └ newly authenticated: @${identity.login ?? "unknown"} - saved to ~/.config/clco/auth.json`,
       )
     }
   })
@@ -466,12 +489,12 @@ async function main(): Promise<void> {
       // Never block an unattended run on a prompt; everything stays off,
       // which is exactly how clco behaved before setup existed.
       console.error(
-        "[clco] 초기 설정을 안 했습니다 — `clco setup`으로 기본값을 정하세요.",
+        "[clco] No startup defaults yet - run `clco setup` to set them.",
       )
     }
   }
 
-  const models = await step("Copilot 토큰·모델 목록 조회", () =>
+  const models = await step("Fetching Copilot token and model list", () =>
     discoverModels(),
   )
   // Printed here, not inside discoverModels: step() runs a spinner that would
@@ -501,8 +524,8 @@ async function main(): Promise<void> {
       ? prefs.last_model
       : undefined
     const selected = await p.autocomplete({
-      message: "모델 선택 — 타이핑해서 검색",
-      placeholder: "모델명 검색…",
+      message: "Pick a model - type to search",
+      placeholder: "Search models...",
       initialValue: last,
       maxItems: 12,
       options: rows.map((o) => {
@@ -510,19 +533,19 @@ async function main(): Promise<void> {
         return {
           value: id,
           label: o.label ?? id,
-          hint: id === last ? `${o.description} · 마지막 사용` : o.description,
+          hint: id === last ? `${o.description} · last used` : o.description,
         }
       }),
     })
     if (p.isCancel(selected)) {
-      p.cancel("취소됨")
+      p.cancel("Cancelled")
       process.exit(0)
     }
     defaultModel = selected as string
     try {
       await savePrefs({ last_model: defaultModel })
     } catch {
-      console.error("[clco] ⚠ 모델 선택 저장 실패 (설정 디렉토리 권한 확인)")
+      console.error("[clco] ! could not save the model choice (check permissions on the config directory)")
     }
   }
 
@@ -537,18 +560,18 @@ async function main(): Promise<void> {
       setAdapterLogSink((line) => {
         void appendFile(logPath, `${line}\n`).catch(() => {})
       })
-      console.error(`✓ 어댑터 로그: ${logPath}`)
+      console.error(`+ adapter log: ${logPath}`)
     } else {
       setAdapterLogSink(null)
     }
   }
-  console.error(`✓ 어댑터: ${server.url}`)
+  console.error(`+ adapter: ${server.url}`)
   console.error(
-    `✓ 모델: ${defaultModel ?? models.sonnet} (sonnet=${models.sonnet} opus=${models.opus} haiku=${models.haiku})`,
+    `+ model: ${defaultModel ?? models.sonnet} (sonnet=${models.sonnet} opus=${models.opus} haiku=${models.haiku})`,
   )
 
   if (args.command === "serve") {
-    console.error("서버 대기 중... (Ctrl+C로 종료)")
+    console.error("Adapter running... (Ctrl+C to stop)")
     await new Promise<never>(() => {})
   }
 
@@ -570,7 +593,7 @@ if (import.meta.main) {
   main().catch((err) => {
     const message = err instanceof Error ? err.message : String(err)
     console.error(
-      `오류: ${message}${isTlsTrustError(message) ? TLS_HINT : ""}`,
+      `Error: ${message}${isTlsTrustError(message) ? TLS_HINT : ""}`,
     )
     process.exit(1)
   })
