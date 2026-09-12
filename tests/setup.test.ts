@@ -247,9 +247,15 @@ describe("browser MCP under a TLS-inspecting proxy", () => {
 
   // The installer guarantees bun, not Node, while startupLine would otherwise
   // report success for a server that cannot spawn.
-  test("says so when npx is missing", () => {
-    expect(startupLine(true, true, "tok", false)).toContain("npx not found")
-    expect(startupLine(true, true, "tok", true)).not.toContain("npx")
+  // clco already runs under bun, so bunx is there; requiring Node as well was
+  // an extra dependency for nothing.
+  test("runs the server with bunx where it exists", () => {
+    const server = JSON.parse(browserMcpConfig(true)!).mcpServers.playwright
+    expect(["bunx", "npx"]).toContain(server.command)
+  })
+
+  test("says so when no runner exists at all", () => {
+    expect(startupLine(true, true, "tok", false)).toContain("neither bunx nor npx")
   })
 })
 
@@ -316,8 +322,8 @@ describe("registry reachability", () => {
     )
   })
 
-  // A missing npx is the more basic problem and should be named first.
-  test("reports a missing npx ahead of the registry", () => {
-    expect(startupLine(true, true, "tok", false, false)).toContain("npx not found")
+  // A missing runner is the more basic problem and should be named first.
+  test("reports a missing runner ahead of the registry", () => {
+    expect(startupLine(true, true, "tok", false, false)).toContain("neither bunx nor npx")
   })
 })

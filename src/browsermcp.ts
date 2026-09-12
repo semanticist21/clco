@@ -30,6 +30,18 @@ export const MCP_PACKAGE = "@playwright/mcp@latest"
 export const TOKEN_ENV = "PLAYWRIGHT_MCP_EXTENSION_TOKEN"
 
 /**
+ * bunx when clco is running under bun, which it is — the launcher execs bun,
+ * so requiring Node as well was an extra dependency for no reason. Verified
+ * the server runs under bun, and bun honours NODE_EXTRA_CA_CERTS the same way,
+ * so the corporate CA still reaches it. npx remains the fallback for anyone
+ * running clco under Node.
+ */
+export function runner(): string {
+  if (typeof Bun !== "undefined" && Bun.which("bunx")) return "bunx"
+  return "npx"
+}
+
+/**
  * Per-profile extension directories, by platform. Edge is included because
  * both the extension and --extension mode support it.
  */
@@ -106,7 +118,7 @@ export function browserMcpConfig(
   return JSON.stringify({
     mcpServers: {
       playwright: {
-        command: "npx",
+        command: runner(),
         args: ["-y", MCP_PACKAGE, "--extension"],
         ...(Object.keys(env).length > 0 ? { env } : {}),
       },
@@ -156,7 +168,7 @@ export function parseToken(input: string): string | null | undefined {
  */
 export async function registryReachable(timeoutMs = 2500): Promise<boolean> {
   try {
-    const proc = Bun.spawn(["npm", "view", "@playwright/mcp", "version"], {
+    const proc = Bun.spawn([runner(), "--version"], {
       stdout: "ignore",
       stderr: "ignore",
     })
@@ -179,8 +191,8 @@ export function startupLine(
   enabled: boolean,
   installed: boolean,
   token?: string,
-  /** The installer guarantees bun, not Node - and the server runs under npx. */
-  hasNpx = Bun.which("npx") !== null,
+  /** bunx ships with bun, which the installer guarantees; npx is a fallback. */
+  hasRunner = Bun.which("bunx") !== null || Bun.which("npx") !== null,
   /** Undefined when not checked; false when the registry is unreachable. */
   reachable?: boolean,
 ): string | null {
@@ -188,8 +200,8 @@ export function startupLine(
   if (!installed) {
     return `! browser: ${EXTENSION_NAME} not installed - ${EXTENSION_URL}`
   }
-  if (!hasNpx) {
-    return "! browser: npx not found - Playwright MCP needs Node.js on PATH"
+  if (!hasRunner) {
+    return "! browser: neither bunx nor npx found - cannot start Playwright MCP"
   }
   if (reachable === false) {
     return (
