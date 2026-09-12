@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test"
-import { isCertValidityError, isTlsTrustError } from "../src/tls"
+import { caPaths, isCertValidityError, isTlsTrustError } from "../src/tls"
+import { homedir } from "node:os"
 import { registryStatus } from "../src/browsermcp"
 
 // These are the literal messages and codes Bun's fetch produces, measured
@@ -149,5 +150,40 @@ describe("isTlsTrustError survives a looping error chain", () => {
       code: "DEPTH_ZERO_SELF_SIGNED_CERT",
     })
     expect(isTlsTrustError(new AggregateError([inner], "fetch failed"))).toBe(true)
+  })
+})
+
+// caPaths is the single parser behind both clco's own trust store and the one
+// path handed to the MCP child, so a disagreement between them shows up as
+// "clco's probe passed but the child could not fetch" - the failure the child
+// path exists to prevent. It had no direct coverage until it became shared.
+describe("caPaths", () => {
+  const cwd = process.cwd()
+
+  test("splits, trims, and makes absolute", () => {
+    expect(caPaths("/a/ca.pem:/b/ca.pem")).toEqual(["/a/ca.pem", "/b/ca.pem"])
+    expect(caPaths(" /a/ca.pem ")).toEqual(["/a/ca.pem"])
+    expect(caPaths("ca.pem")).toEqual([`${cwd}/ca.pem`])
+  })
+
+  test("expands ~, and treats a bare ~ as unset", () => {
+    expect(caPaths("~/ca.pem")).toEqual([`${homedir()}/ca.pem`])
+    // The home directory is not a certificate; passing it on produced an
+    // EISDIR-class line instead of saying so.
+    expect(caPaths("~")).toEqual([])
+    // Only a path segment, not any leading tilde.
+    expect(caPaths("~ca.pem")).toEqual([`${cwd}/~ca.pem`])
+  })
+
+  test("nothing configured is an empty list, not a path", () => {
+    expect(caPaths(undefined)).toEqual([])
+    expect(caPaths("")).toEqual([])
+    expect(caPaths("   ")).toEqual([])
+    // Empty segments from a stray or doubled separator.
+    expect(caPaths("::/b/ca.pem")).toEqual(["/b/ca.pem"])
+  })
+
+  test("order is preserved, because the child gets the first that reads", () => {
+    expect(caPaths("/z/ca.pem:/a/ca.pem")[0]).toBe("/z/ca.pem")
   })
 })
