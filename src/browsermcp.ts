@@ -25,9 +25,19 @@ import { homedir, platform } from "node:os"
 import { join } from "node:path"
 
 export const EXTENSION_ID = "mmlmfjhmonkocbjadbfplnigmagldckm"
-export const EXTENSION_NAME = "Playwright MCP Bridge"
+// The name the Web Store actually shows. It was "Playwright MCP Bridge" here,
+// which is how the project describes the extension in its docs but not what
+// the listing is called - so searching the store for it finds nothing, and
+// following the link lands on a page with a different name, which reads like
+// the wrong page.
+export const EXTENSION_NAME = "Playwright Extension"
+// The id-only form, which the Web Store 301s to the slug form. It is 73
+// characters against the slug form's 94, and that is the difference between
+// fitting inside a clack note box at 80 columns and being wrapped mid-URL -
+// where it can be neither clicked nor copied, which is how a required install
+// step went unnoticed.
 export const EXTENSION_URL =
-  `https://chromewebstore.google.com/detail/playwright-extension/${EXTENSION_ID}`
+  `https://chromewebstore.google.com/detail/${EXTENSION_ID}`
 // @latest. The server half is fetched from npm each session, and the extension
 // half auto-updates from the Web Store and cannot be pinned alongside it, so
 // pinning the server lets the two drift. Pinning also does not
@@ -280,7 +290,13 @@ export function startupLine(
 ): string | null {
   if (!enabled) return null
   if (!installed) {
-    return `! browser: ${EXTENSION_NAME} not installed - ${EXTENSION_URL}`
+    // Two lines on purpose: the URL has to start a line to survive an 80-column
+    // terminal intact, and this is the one clco message whose whole job is to
+    // get a link in front of the user.
+    return (
+      `! browser: no tools - "${EXTENSION_NAME}" is not installed in Chrome,\n` +
+      `  and only you can add it:\n  ${EXTENSION_URL}`
+    )
   }
   if (!hasRunner) {
     return "! browser: neither bunx nor npx found - cannot start Playwright MCP"
@@ -331,20 +347,33 @@ export function startupLine(
  * the very command that is running.
  */
 export function setupNote(installed: boolean): string {
-  return installed
-    ? `${EXTENSION_NAME} detected - registering ${mcpPackage()} --extension.\n` +
-        `Tools arrive as mcp__playwright__*. Click the extension to share a tab.`
-    : `The ${EXTENSION_NAME} extension is not installed, and only you can\n` +
-        `add it:\n  ${EXTENSION_URL}\n` +
-        `Until then clco registers no browser server, so no tools appear.`
+  if (installed) {
+    return (
+      `${EXTENSION_NAME} detected - registering ${mcpPackage()} --extension.\n` +
+      `Tools arrive as mcp__playwright__*. Click the extension to share a tab.`
+    )
+  }
+  // Lead with the fact that this needs a manual step. The previous wording
+  // buried it in a subordinate clause and wrapped the URL, so it read as an
+  // aside - people answered Yes and then wondered why no browser tools ever
+  // showed up.
+  return (
+    `Needs a Chrome extension that clco cannot install for you.\n` +
+    `Without it there is no browser control at all - no tools appear.\n` +
+    `\n` +
+    `Open this and click "Add to Chrome":\n` +
+    `${EXTENSION_URL}\n` +
+    `\n` +
+    `Answering Yes now is fine - install it whenever, then restart clco.`
+  )
 }
 
 export function extensionHint(installed: boolean, token?: string): string {
   if (!installed) {
     return (
-      `Browser control needs the ${EXTENSION_NAME} extension, which only you\n` +
-      `can install:\n  ${EXTENSION_URL}\n` +
-      `Until then clco registers no browser server, so no tools appear.`
+      `Browser control is ON but has no extension, so no tools appear.\n` +
+      `${EXTENSION_NAME} is the missing half, and only you can install it:\n` +
+      `${EXTENSION_URL}`
     )
   }
   // Whether a session is actually attached cannot be known here: the server

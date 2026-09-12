@@ -3,6 +3,7 @@ import { readFile, rm } from "node:fs/promises"
 import { homedir, tmpdir } from "node:os"
 import { join } from "node:path"
 import {
+  EXTENSION_URL,
   MCP_PACKAGE,
   browserMcpConfig,
   extensionHint,
@@ -227,8 +228,15 @@ describe("startup line", () => {
   test("reports what clco did, and whether a dialog is coming", () => {
     expect(startupLine(true, true, "tok")).toBe("+ browser: @playwright/mcp@latest")
     expect(startupLine(true, true)).toContain("connect dialog each session")
-    expect(startupLine(true, false)).toContain("not installed")
-    expect(startupLine(true, false)).toContain("chromewebstore.google.com")
+    // Spread over lines on purpose: the URL must START a line to survive an
+    // 80-column terminal. Wrapped mid-URL it can be neither clicked nor
+    // copied, which is how a required install step went unnoticed.
+    const missing = startupLine(true, false)!
+    expect(missing).toContain("not installed in Chrome")
+    expect(missing).toContain("only you can add it")
+    const urlLine = missing.split("\n").find((l) => l.includes("chromewebstore"))!
+    expect(urlLine.trim()).toBe(EXTENSION_URL)
+    expect(urlLine.length).toBeLessThanOrEqual(78)
   })
 
   // Nothing to say when browser control is off, or off for this run.

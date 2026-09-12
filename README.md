@@ -46,7 +46,7 @@ clco
    | Question | Default | What it does |
    |---|---|---|
    | Run without permission prompts? | **Yes** | Passes `--dangerously-skip-permissions`, so claude edits files and runs commands without asking. `clco --no-bypass` for one session. |
-   | Enable Playwright MCP for browser control? | **Yes** | Registers the Playwright MCP server for clco sessions only. Needs an extension — see [Browser control](#browser-control). `clco --no-browser` for one session. |
+   | Enable Playwright MCP for browser control? | **Yes** | Registers the Playwright MCP server for clco sessions only. **Also needs a Chrome extension you install yourself** — see [Browser control](#browser-control). `clco --no-browser` for one session. |
    | Pick a model each time clco starts? | **Yes** | Shows the model prompt at launch. Answering No reuses your last pick. `clco --no-select` for one session. |
 
 3. **Pick a model**, then claude starts. Switch mid-session with `/model`.
@@ -94,10 +94,14 @@ is always `user:inference`. Passing `--chrome` registers nothing.
 
 Playwright MCP has no such gate, and in `--extension` mode it drives the tab you
 share from your own browser — logins and cookies intact — rather than a fresh
-profile. Install [Playwright MCP
-Bridge](https://chromewebstore.google.com/detail/playwright-extension/mmlmfjhmonkocbjadbfplnigmagldckm),
-then answer yes at `clco setup`. Tools arrive as `mcp__playwright__*` once you
-click the extension to share a tab.
+profile.
+
+**It needs a Chrome extension, and clco cannot install it for you.** Without it
+there is no browser control at all — clco registers no server and no tools
+appear. Install [Playwright
+Extension](https://chromewebstore.google.com/detail/mmlmfjhmonkocbjadbfplnigmagldckm)
+(listed under that name, not "Playwright MCP"), then answer yes at `clco setup`.
+Tools arrive as `mcp__playwright__*` once you click the extension to share a tab.
 
 The extension shows a `PLAYWRIGHT_MCP_EXTENSION_TOKEN`; storing it skips the
 connect dialog every session:
