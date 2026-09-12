@@ -447,17 +447,29 @@ async function main(): Promise<void> {
     list.length > 0
   ) {
     const prefs = await loadPrefs()
-    const last = prefs.last_model
+    // Offer exactly what /model will: the raw upstream list also carries
+    // embeddings and Copilot's internal plumbing, which cannot hold a
+    // conversation at all, and repeats display names across several slugs.
+    const picker = buildModelPickerFrom(list)
+    const rows = picker?.options ?? []
+    // A remembered model the current account no longer offers would preselect
+    // a row that is not there.
+    const last = rows.some((o) => normalizeModel(o.model) === prefs.last_model)
+      ? prefs.last_model
+      : undefined
     const selected = await p.autocomplete({
       message: "모델 선택 — 타이핑해서 검색",
       placeholder: "모델명 검색…",
       initialValue: last,
       maxItems: 12,
-      options: list.slice(0, 100).map((m) => ({
-        value: m.id,
-        label: m.name !== m.id ? m.name : m.id,
-        hint: m.id === last ? `${m.id} · 마지막 사용` : m.id,
-      })),
+      options: rows.map((o) => {
+        const id = normalizeModel(o.model)
+        return {
+          value: id,
+          label: o.label ?? id,
+          hint: id === last ? `${o.description} · 마지막 사용` : o.description,
+        }
+      }),
     })
     if (p.isCancel(selected)) {
       p.cancel("취소됨")
