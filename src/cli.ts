@@ -313,7 +313,12 @@ export async function updateInstall(
     if (checkout.exitCode !== 0) throw new Error(commandFailure("staged checkout failed", checkout))
 
     let install = run([bunCommand, "install", "--frozen-lockfile"], stage)
-    if (install.exitCode !== 0) {
+    const frozenFailure = output(install)
+    const incompatibleLockfile =
+      /unknown lockfile version|unknownlockfileversion|failed to parse lockfile/i.test(
+        frozenFailure,
+      )
+    if (install.exitCode !== 0 && incompatibleLockfile) {
       install = run([bunCommand, "install", "--no-save"], stage)
     }
     if (install.exitCode !== 0) {
@@ -416,7 +421,7 @@ async function runUpdate(): Promise<void> {
     dir,
     process.env.CLCO_BIN_DIR ?? join(homedir(), ".local", "bin"),
     CANONICAL_REPOSITORY,
-    process.env.CLCO_BUN_BIN ?? "bun",
+    process.env.CLCO_BUN_BIN ?? process.execPath,
   )
 }
 

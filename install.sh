@@ -14,14 +14,22 @@ command -v git >/dev/null 2>&1 || fail "git is required - please install it firs
 
 install_dependencies() {
   local target="$1"
+  local frozen_output
   log "Installing dependencies (bun install)"
-  if (cd "$target" && bun install --frozen-lockfile >/dev/null 2>&1); then
+  if frozen_output="$(cd "$target" && bun install --frozen-lockfile 2>&1)"; then
     return 0
+  fi
+  if [[ "$frozen_output" != *"Unknown lockfile version"* &&
+    "$frozen_output" != *"UnknownLockfileVersion"* &&
+    "$frozen_output" != *"failed to parse lockfile"* ]]; then
+    printf '%s\n' "$frozen_output" >&2
+    return 1
   fi
   if (cd "$target" && bun install --no-save >/dev/null 2>&1); then
     return 0
   fi
   log "bun install failed - full output:"
+  printf '%s\n' "$frozen_output" >&2
   (cd "$target" && bun install --no-save) || return 1
 }
 
