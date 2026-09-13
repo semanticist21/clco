@@ -22,6 +22,16 @@ $ clco
 
 ## Install
 
+From npm (Bun is still required at runtime):
+
+```sh
+npm install --global clco
+```
+
+Update npm installs with `npm install --global clco@latest`.
+
+Or use the GitHub installer:
+
 ```sh
 curl -fsSL https://raw.githubusercontent.com/semanticist21/clco/main/install.sh | bash
 ```
@@ -30,9 +40,10 @@ Installs to `~/.local/share/clco`, launcher at `~/.local/bin/clco`.
 For custom paths: `curl -fsSL ... | CLCO_DIR=~/somewhere BIN_DIR=~/bin bash`.
 The same `CLCO_DIR` and `BIN_DIR` values can be passed to `uninstall.sh`.
 
-Needs the [claude CLI](https://claude.com/claude-code) (the installer offers to
-fetch it), a GitHub account with Copilot, and [Bun](https://bun.sh) (installed
-before running the installer).
+Needs the [claude CLI](https://claude.com/claude-code), a GitHub account with
+Copilot, and [Bun](https://bun.sh). npm installs the package, but clco still
+runs on Bun because the adapter uses Bun's server and process APIs; Node is not
+a runtime fallback yet.
 
 If you need to install Bun yourself:
 

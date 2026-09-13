@@ -1,0 +1,27 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+CLCO_LAUNCHER="${BASH_SOURCE[0]}"
+while [ -L "$CLCO_LAUNCHER" ]; do
+  CLCO_LAUNCHER_DIR="$(cd -P -- "$(dirname -- "$CLCO_LAUNCHER")" && pwd)"
+  CLCO_LAUNCHER="$(readlink -- "$CLCO_LAUNCHER")"
+  case "$CLCO_LAUNCHER" in
+    /*) ;;
+    *) CLCO_LAUNCHER="$CLCO_LAUNCHER_DIR/$CLCO_LAUNCHER" ;;
+  esac
+done
+CLCO_PACKAGE_DIR="$(cd -P -- "$(dirname -- "$CLCO_LAUNCHER")/.." && pwd)"
+export CLCO_NPM_INSTALL=1
+CLCO_BUN_BIN="${CLCO_BUN_BIN:-$(command -v bun || true)}"
+if [ -z "$CLCO_BUN_BIN" ]; then
+  printf '%s\n' "Bun is required to run clco. Install it with: curl -fsSL https://bun.sh/install | bash" >&2
+  printf '%s\n' "Node is not a runtime fallback yet; see https://bun.sh/docs/installation" >&2
+  exit 1
+fi
+
+if [ "${1:-}" = "--" ]; then
+  shift
+  set -- "__clco_passthrough__" "$@"
+fi
+
+exec "$CLCO_BUN_BIN" run --no-install "$CLCO_PACKAGE_DIR/src/cli.ts" "$@"

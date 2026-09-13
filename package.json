@@ -1,8 +1,22 @@
 {
   "name": "clco",
   "version": "0.1.0",
-  "private": true,
+  "private": false,
   "type": "module",
+  "description": "Run Claude Code on a GitHub Copilot subscription",
+  "bin": {
+    "clco": "bin/clco"
+  },
+  "files": [
+    "bin",
+    "src",
+    "scripts",
+    "install.sh",
+    "uninstall.sh",
+    "README.md",
+    "LICENSE",
+    "bun.lock"
+  ],
   "scripts": {
     "start": "bun run src/cli.ts",
     "test": "bun test",
