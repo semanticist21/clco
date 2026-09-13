@@ -41,7 +41,7 @@ async function writeRelease(work: string, marker: string) {
   await mkdir(join(work, "scripts"), { recursive: true })
   await writeFile(
     join(work, "package.json"),
-    JSON.stringify({ name: "update-fixture", version: "1.0.0" }) + "\n",
+    JSON.stringify({ name: "clco", version: "1.0.0" }) + "\n",
   )
   await writeFile(join(work, "src", "marker.txt"), marker + "\n")
   await writeFile(join(work, "src", "cli.ts"), 'console.log("fixture")\n')
@@ -72,6 +72,7 @@ describe("updateInstall", () => {
       const launcher = await readFile(join(f.bin, "clco"), "utf8")
       expect(launcher).toContain(`CLCO_BIN_DIR=${f.bin}`)
       expect(launcher).toContain("CLCO_BUN_BIN=")
+      expect(launcher).toContain("run --no-install")
       expect(existsSync(join(f.bin, "clco"))).toBe(true)
     } finally {
       await rm(f.root, { recursive: true, force: true })

@@ -285,6 +285,14 @@ export async function updateInstall(
     throw new Error("update requires a checked-out branch")
   }
   const branchName = branch.stdout.toString().trim()
+  try {
+    const manifest = JSON.parse(await readFile(join(dir, "package.json"), "utf8")) as {
+      name?: string
+    }
+    if (manifest.name !== "clco") throw new Error("not clco")
+  } catch {
+    throw new Error("update refused: the target is not a clco installation")
+  }
   const stageRoot = await mkdtemp(join(dirname(dir), ".clco-update-"))
   const stage = join(stageRoot, "app")
 
@@ -572,7 +580,7 @@ async function reportBrowserNotes(): Promise<void> {
 }
 
 /** Matches LAUNCHER_VERSION in scripts/write-launcher.sh. */
-const LAUNCHER_VERSION = 3
+const LAUNCHER_VERSION = 4
 
 function reportStaleLauncher(): void {
   // CLCO_APP_DIR is set by every launcher; without it clco was started

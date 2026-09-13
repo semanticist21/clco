@@ -46,6 +46,14 @@ if [ ! -e "$CLCO_DIR" ] && [ -d "$CLCO_DIR.previous/.git" ]; then
 fi
 if [ -d "$CLCO_DIR/.git" ]; then
   log "Updating the existing install: $CLCO_DIR"
+  grep -Eq '^[[:space:]]*"name"[[:space:]]*:[[:space:]]*"clco"[[:space:]]*,?[[:space:]]*$' \
+    "$CLCO_DIR/package.json" \
+    || fail "$CLCO_DIR is a git repo, but not a clco install"
+  CURRENT_URL="$(git -C "$CLCO_DIR" remote get-url origin 2>/dev/null || true)"
+  case "$CURRENT_URL" in
+    "$REPO"|git@github.com:semanticist21/clco.git) ;;
+    *) fail "$CLCO_DIR does not point to the canonical clco repository" ;;
+  esac
   [ -z "$(git -C "$CLCO_DIR" status --porcelain)" ] \
     || fail "Update aborted - local changes exist in $CLCO_DIR; commit or stash them first"
   CURRENT_HEAD="$(git -C "$CLCO_DIR" rev-parse HEAD)" \

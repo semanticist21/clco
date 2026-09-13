@@ -12,7 +12,7 @@ BUN_BIN="${3:-$(command -v bun)}"
 
 # Bump when the launcher body changes; clco compares it to warn about a stale
 # launcher that predates a feature.
-LAUNCHER_VERSION=3
+LAUNCHER_VERSION=4
 
 mkdir -p "$BIN_DIR"
 [ ! -d "$BIN_DIR/clco" ] || {

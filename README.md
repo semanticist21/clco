@@ -158,7 +158,7 @@ this lockfile format, it falls back to `bun install --no-save`, which installs
 dependencies without rewriting `bun.lock`; using a current Bun release is still
 recommended.
 
-If you installed with custom `CLCO_DIR` or `BIN_DIR` values before launcher v3,
+If you installed with custom `CLCO_DIR` or `BIN_DIR` values before launcher v4,
 re-run the installer once with those same values so the launcher can migrate.
 
 - **Chrome, Chromium and Edge profile directories** — directory *names* only, to
