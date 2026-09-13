@@ -193,25 +193,11 @@ export function browserMcpConfig(
 }
 
 /** Compose the session-only MCP config without replacing a user's config file. */
-export function combinedMcpConfig(
-  browserInstalled: boolean,
-  webEnabled: boolean,
-  webModel?: string,
-): string | null {
-  const browser = browserMcpConfig(browserInstalled)
-  const mcpServers: Record<string, unknown> = browser
-    ? ((JSON.parse(browser) as { mcpServers: Record<string, unknown> }).mcpServers)
-    : {}
-  if (webEnabled) {
-    const env: Record<string, string> = {}
-    if (webModel) env.CLCO_WEB_MODEL = webModel
-    mcpServers.clco_web = {
-      command: process.execPath,
-      args: [join(import.meta.dir, "webmcp.ts")],
-      ...(Object.keys(env).length > 0 ? { env } : {}),
-    }
-  }
-  return Object.keys(mcpServers).length > 0 ? JSON.stringify({ mcpServers }) : null
+export function combinedMcpConfig(browserInstalled: boolean): string | null {
+  // Web needs no MCP server: Claude's built-in Fetch already works through
+  // the adapter, and Copilot's endpoint rejects native web search on this
+  // seat (responses.ts drops the tool instead of sending it broken).
+  return browserMcpConfig(browserInstalled)
 }
 
 // The extension mints a base64url value; nothing else should be accepted.

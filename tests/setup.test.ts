@@ -43,12 +43,11 @@ const saved = (over: Partial<Record<string, boolean>> = {}) => ({
   ...over,
 })
 
-test("web setup registers both local tools without browser control", () => {
-  const config = JSON.parse(combinedMcpConfig(false, true, "gpt-4.1")!)
-  expect(config.mcpServers.clco_web.args[0]).toContain("webmcp.ts")
-  expect(config.mcpServers.clco_web.env).toEqual({ CLCO_WEB_MODEL: "gpt-4.1" })
-  expect(setupClaudeArgs(saved({ web: true }), {}, [], false, "gpt-4.1")).toContain("--mcp-config")
-  expect(setupClaudeArgs(saved({ web: true }), { web: false }, [], false, "gpt-4.1")).toEqual(["--dangerously-skip-permissions"])
+test("web setup registers no MCP server - built-in Fetch suffices and search is dropped", () => {
+  expect(combinedMcpConfig(false)).toBeNull()
+  expect(setupClaudeArgs(saved({ web: true }), {}, [], false)).toEqual([
+    "--dangerously-skip-permissions",
+  ])
 })
 
 describe("setupClaudeArgs", () => {

@@ -66,7 +66,6 @@ clco
    | Question | Default | What it does |
    |---|---|---|
    | Run without permission prompts? | **Yes** | Passes `--dangerously-skip-permissions`, so claude edits files and runs commands without asking. `clco --no-bypass` for one session. |
-   | Replace Claude built-in web search with GitHub Copilot native web search? | **Yes** | Registers native search and a local safe URL fetcher for this session. `clco --no-web` for one session. |
    | Enable Playwright MCP for browser control? | **Yes** | Registers the Playwright MCP server for clco sessions only. **Also needs a Chrome extension you install yourself** — see [Browser control](#browser-control). `clco --no-browser` for one session. |
    | Pick a model each time clco starts? | **Yes** | Shows the model prompt at launch. Answering No reuses your last pick. `clco --no-select` for one session. |
 
@@ -85,13 +84,11 @@ clco
 
 ## Web access
 
-The optional web integration registers two session-only local MCP tools:
-GitHub Copilot native `web_search` and a safe `web_fetch` for public HTML,
-text, JSON, and PDF URLs. It does not use an API key, browser cookies, Jina,
-Firecrawl, or a hidden browser fallback. `web_fetch` blocks private targets,
-re-checks redirects, limits responses to 5 MB, and reports JavaScript-only
-pages clearly so browser control remains a separate choice. Existing installs
-keep this off until `clco setup` is run.
+Claude's built-in Fetch works as-is: it fetches pages locally and only the
+summarizing model call rides the adapter. Claude's built-in WebSearch cannot
+work here - Anthropic executes it server-side, and Copilot's endpoint rejects
+a native web_search tool - so the adapter drops it instead of sending a
+broken request. No web MCP server is registered.
 
 ## Usage
 
