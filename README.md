@@ -202,8 +202,16 @@ curl -fsSL https://raw.githubusercontent.com/semanticist21/clco/main/uninstall.s
      Responses API where a model requires it (the GPT-5.x family). SSE
      streaming, tool calling, images and parallel tool calls work on both.
 
-   A rejected native attempt falls back to the translated path and is
-   remembered. `CLCO_NO_PASSTHROUGH=1` forces translation everywhere.
+   A rejected native attempt falls back to the translated path. Only an
+   unsupported model/endpoint rejection (including HTTP 404) is remembered;
+   other request errors leave native routing available on the next turn.
+   Route changes are recorded in the adapter log (`CLCO_DEBUG=1` in run mode).
+   `CLCO_NO_PASSTHROUGH=1` forces translation everywhere.
+
+   Input token counts are approximate. Near the discovered limit, the adapter
+   logs a warning and forwards the request; the upstream decides whether it
+   fits. With no known launch model budget, auto-compact uses at most 128k
+   tokens, lowered to the smallest discovered input budget if needed.
 
 ## Development
 

@@ -2,6 +2,8 @@
 // (GPT-5.x "luna" family) must work transparently, both streaming and not.
 
 import { describe, expect, test } from "bun:test"
+import { setModelAliases } from "../src/translate"
+import type { AnthropicRequest } from "../src/wire"
 import {
   toResponsesRequest,
   ResponsesEventAdapter,
@@ -9,6 +11,31 @@ import {
 } from "../src/responses"
 
 describe("toResponsesRequest", () => {
+  test("normalizes advertised aliases and bracket suffixes", () => {
+    setModelAliases(new Map([["advertised-gpt", "gpt-upstream"]]))
+    try {
+      expect(toResponsesRequest({ model: "advertised-gpt[1m]", max_tokens: 1, messages: [] }).model)
+        .toBe("gpt-upstream")
+    } finally {
+      setModelAliases(new Map())
+    }
+  })
+
+  test("names unsupported blocks in messages and nested tool results", () => {
+    const document = { type: "document", title: "report.pdf", source: { type: "base64", data: "PDF" } }
+    const out = toResponsesRequest({
+      model: "gpt", max_tokens: 1,
+      messages: [
+        { role: "user", content: [document, { type: "future_block" }] },
+        { role: "user", content: [{ type: "tool_result", tool_use_id: "t1", content: [document] }] },
+      ],
+    } as unknown as AnthropicRequest)
+    const content = JSON.stringify(out.input)
+    expect(content).toContain("document block was not forwarded")
+    expect(content).toContain("future_block block was not forwarded")
+    expect(out.input[1].output).toContain("report.pdf")
+  })
+
   test("system -> instructions; tool rounds -> function_call / function_call_output", () => {
     const out = toResponsesRequest({
       model: "gpt-5.6-luna",
@@ -56,6 +83,22 @@ describe("toResponsesRequest", () => {
 })
 
 describe("ResponsesEventAdapter", () => {
+  test.each(["content_filter", "max_messages", "steered"])("incomplete cause %s is explicit, not token exhaustion", (reason) => {
+    const response = { status: "incomplete", incomplete_details: { reason } }
+    const adapter = new ResponsesEventAdapter()
+    expect(adapter.pushEvent({ type: "response.incomplete", response })?.error?.message).toContain(reason)
+    expect(responsesToOpenAIResponse(response).error?.message).toContain(reason)
+  })
+
+  test.each([false, true])("incomplete output stays truncated with tools=%s", (tools) => {
+    const adapter = new ResponsesEventAdapter()
+    const call = { type: "function_call", call_id: "c1", id: "f1", name: "Read", arguments: '{"path":' }
+    if (tools) adapter.pushEvent({ type: "response.output_item.added", item: call })
+    const response = { status: "incomplete", incomplete_details: { reason: "max_output_tokens" }, output: tools ? [call] : [] }
+    expect(adapter.pushEvent({ type: "response.incomplete", response })?.choices?.[0].finish_reason).toBe("length")
+    expect(responsesToOpenAIResponse(response).choices?.[0].finish_reason).toBe("length")
+  })
+
   test("maps text deltas, tool calls, usage, and failures to OpenAI chunks", () => {
     const adapter = new ResponsesEventAdapter()
     expect(adapter.pushEvent({ type: "response.created" })).toBeNull()
@@ -224,4 +267,36 @@ describe("ResponsesEventAdapter", () => {
     ])
     expect(out.usage).toEqual({ prompt_tokens: 4, completion_tokens: 5 })
   })
+})
+
+test("parallel Responses tool round-trips preserve ids, arguments and images", () => {
+  const input = toResponsesRequest({
+    model: "gpt", max_tokens: 32,
+    messages: [
+      { role: "assistant", content: [
+        { type: "tool_use", id: "c1", name: "Read", input: { path: "/one" } },
+        { type: "tool_use", id: "c2", name: "Read", input: { path: "/two" } },
+      ] },
+      { role: "user", content: [
+        { type: "tool_result", tool_use_id: "c1", content: [
+          { type: "text", text: "one" },
+          { type: "image", source: { type: "base64", media_type: "image/png", data: "AAAA" } },
+        ] },
+        { type: "tool_result", tool_use_id: "c2", content: "two" },
+        { type: "text", text: "compare" },
+      ] },
+    ],
+  }).input
+  expect(input.slice(0, 4).map((item) => [item.type, item.call_id])).toEqual([
+    ["function_call", "c1"], ["function_call", "c2"],
+    ["function_call_output", "c1"], ["function_call_output", "c2"],
+  ])
+  expect(input[0].arguments).toBe('{"path":"/one"}')
+  expect(input[1].arguments).toBe('{"path":"/two"}')
+  expect(input[2].output).toContain("one")
+  expect(input[3].output).toBe("two")
+  expect(input[4]).toEqual({ role: "user", content: [
+    { type: "input_image", image_url: "data:image/png;base64,AAAA" },
+    { type: "input_text", text: "compare" },
+  ] })
 })

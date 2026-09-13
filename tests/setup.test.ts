@@ -12,6 +12,7 @@ import {
   probesDefaultRegistry,
   setupNote,
   startupLine,
+  startupLine as startupFixture,
 } from "../src/browsermcp"
 import {
   modelWithoutPrompt,
@@ -20,6 +21,18 @@ import {
   shouldSelectModel,
 } from "../src/setup"
 import { tlsHint } from "../src/tls"
+
+// Most cases exercise defaults; exported package overrides belong only in
+// the explicit override test. Width fixtures below are built before hooks.
+let inheritedPackage: string | undefined
+beforeEach(() => {
+  inheritedPackage = process.env.CLCO_MCP_PACKAGE
+  delete process.env.CLCO_MCP_PACKAGE
+})
+afterEach(() => {
+  if (inheritedPackage === undefined) delete process.env.CLCO_MCP_PACKAGE
+  else process.env.CLCO_MCP_PACKAGE = inheritedPackage
+})
 
 const saved = (over: Partial<Record<string, boolean>> = {}) => ({
   version: 2,
@@ -108,6 +121,10 @@ describe("browser control", () => {
     // an override that leaked into the unset case would be invisible here
     // otherwise.
     expect(spec(browserMcpConfig(true, undefined))).toBe("@playwright/mcp@latest")
+    process.env.CLCO_MCP_PACKAGE = "@corp/x@1.0.0"
+    expect(spec(browserMcpConfig(true, undefined))).toBe("@corp/x@1.0.0")
+    expect(setupNote(true)).toContain("@corp/x@1.0.0")
+    expect(extensionHint(true)).toContain("@corp/x@1.0.0")
     // And the startup line has to name what actually runs, or "which version
     // was that?" has no answer after a bad release.
     expect(startupLine(true, true, "tok", true, "ok", undefined, "@corp/x@1.0.0"))
@@ -228,8 +245,8 @@ describe("token parsing", () => {
 
 describe("startup line", () => {
   test("reports what clco did, and whether a dialog is coming", () => {
-    expect(startupLine(true, true, "tok")).toBe("+ browser: @playwright/mcp@latest")
-    expect(startupLine(true, true)).toContain("connect dialog each session")
+    expect(startupLine(true, true, "tok", true)).toBe("+ browser: @playwright/mcp@latest")
+    expect(startupLine(true, true, undefined, true)).toContain("connect dialog each session")
     // Spread over lines on purpose: the URL must START a line to survive an
     // 80-column terminal. Wrapped mid-URL it can be neither clicked nor
     // copied, which is how a required install step went unnoticed.
@@ -549,6 +566,11 @@ describe("nothing clco prints overflows an 80-column terminal", () => {
   const LIMIT = 76
   const lines = (text: string | null) => (text ?? "").split("\n")
 
+  const startupLine = (
+    enabled: boolean, installed: boolean, token?: string, hasRunner = true,
+    registry?: Parameters<typeof startupFixture>[4], registered?: boolean,
+    pkg = "@playwright/mcp@latest", caLoaded = false,
+  ) => startupFixture(enabled, installed, token, hasRunner, registry, registered, pkg, caLoaded)
   const everything: Array<[string, string | null]> = [
     ["no extension", startupLine(true, false)],
     ["no runner", startupLine(true, true, "t", false)],
@@ -561,11 +583,11 @@ describe("nothing clco prints overflows an 80-column terminal", () => {
     ["ok", startupLine(true, true, "t", true, "ok")],
     ["ok, no token", startupLine(true, true, undefined, true, "ok")],
     ["other package", startupLine(true, true, undefined, true, undefined, undefined, "@corp/mcp@9.9.9")],
-    ["setup note, missing", setupNote(false)],
-    ["setup note, present", setupNote(true)],
-    ["hint, missing", extensionHint(false)],
-    ["hint, no token", extensionHint(true)],
-    ["hint, token", extensionHint(true, "tok")],
+    ["setup note, missing", setupNote(false, "@playwright/mcp@latest")],
+    ["setup note, present", setupNote(true, "@playwright/mcp@latest")],
+    ["hint, missing", extensionHint(false, undefined, "@playwright/mcp@latest")],
+    ["hint, no token", extensionHint(true, undefined, "@playwright/mcp@latest")],
+    ["hint, token", extensionHint(true, "tok", "@playwright/mcp@latest")],
     ["tls hint, no bundle", tlsHint(false)],
     ["tls hint, bundle", tlsHint(true)],
   ]

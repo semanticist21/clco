@@ -4,7 +4,9 @@
 // Responses SSE events into OpenAI-style chunks so the existing
 // StreamTranslator can render Anthropic events unchanged.
 
-import { effortFor, type AnthropicRequest, type OpenAIResponse } from "./translate"
+import { effortFor, normalizeModel } from "./translate"
+import type { AnthropicRequest, OpenAIResponse } from "./wire"
+import { classifyContent } from "./blocks"
 
 // ---------------------------------------------------------------------------
 // Request direction: Anthropic -> Responses
@@ -53,14 +55,9 @@ export function toResponsesRequest(
     // Tool results must land in the same order as the conversation.
     const rest: Array<Record<string, unknown>> = []
     const pendingImages: Array<Record<string, unknown>> = []
-    const flushImages = () => {
-      if (pendingImages.length > 0) {
-        input.push({ role: "user", content: [...pendingImages] })
-        pendingImages.length = 0
-      }
-    }
-    for (const block of message.content) {
-      if (block.type === "tool_result") {
+    for (const view of classifyContent(message.content)) {
+      if (view.kind === "tool_result") {
+        const block = view.block
         // Flush pending user content before the tool output to preserve
         // ordering (results come first in Anthropic user messages anyway).
         if (rest.length > 0) {
@@ -73,13 +70,12 @@ export function toResponsesRequest(
           text = block.content
         } else if (Array.isArray(block.content)) {
           const texts: string[] = []
-          for (const b of block.content) {
-            if (b.type === "text") texts.push(b.text)
-            else if (b.type === "thinking") texts.push(b.thinking)
-            else if (b.type === "image")
+          for (const child of classifyContent(block.content)) {
+            if (child.kind === "text" || child.kind === "unsupported") texts.push(child.text)
+            else if (child.kind === "image")
               images.push({
                 type: "input_image",
-                image_url: `data:${b.source.media_type};base64,${b.source.data}`,
+                image_url: `data:${child.block.source.media_type};base64,${child.block.source.data}`,
               })
           }
           text = texts.join("\n\n")
@@ -100,19 +96,19 @@ export function toResponsesRequest(
         })
         continue
       }
-      if (block.type === "text") {
+      if (view.kind === "text" || view.kind === "unsupported") {
         rest.push({
           type: message.role === "assistant" ? "output_text" : "input_text",
-          text: block.text,
+          text: view.text,
         })
-      } else if (block.type === "thinking") {
-        rest.push({ type: "output_text", text: block.thinking })
-      } else if (block.type === "image") {
+      } else if (view.kind === "image") {
+        const block = view.block
         rest.push({
           type: "input_image",
           image_url: `data:${block.source.media_type};base64,${block.source.data}`,
         })
-      } else if (block.type === "tool_use") {
+      } else if (view.kind === "tool_use") {
+        const block = view.block
         if (rest.length > 0) {
           input.push({ role: message.role, content: [...rest] })
           rest.length = 0
@@ -123,6 +119,9 @@ export function toResponsesRequest(
           name: block.name,
           arguments: JSON.stringify(block.input),
         })
+      } else {
+        const exhaustive: never = view
+        throw new Error(`unhandled content: ${exhaustive}`)
       }
     }
     if (pendingImages.length > 0 || rest.length > 0) {
@@ -143,7 +142,7 @@ export function toResponsesRequest(
   const effort = effortFor(payload, allowedEfforts)
 
   return {
-    model: payload.model,
+    model: normalizeModel(payload.model),
     ...(instructions && { instructions }),
     ...(effort && { reasoning: { effort } }),
     input,
@@ -173,6 +172,15 @@ export function toResponsesRequest(
 // ---------------------------------------------------------------------------
 // Event direction: Responses SSE -> OpenAI-style chunks (for StreamTranslator)
 // ---------------------------------------------------------------------------
+
+function incompleteError(response: Record<string, unknown> | undefined): OpenAIResponse | null {
+  const details = response?.incomplete_details as { reason?: string } | undefined
+  const reason = details?.reason
+  // Only token exhaustion (or missing detail) maps to max_tokens. Other
+  // incomplete causes must not masquerade as successful text or tool calls.
+  if (!reason || reason === "max_output_tokens") return null
+  return { id: "r", model: "", error: { code: "response_incomplete", message: `upstream response incomplete: ${reason}` } }
+}
 
 export class ResponsesEventAdapter {
   private toolIndexes = new Map<string, number>()
@@ -291,6 +299,10 @@ export class ResponsesEventAdapter {
     }
 
     if (type === "response.completed" || type === "response.incomplete") {
+      if (type === "response.incomplete") {
+        const error = incompleteError(event.response as Record<string, unknown> | undefined)
+        if (error) return error
+      }
       const response = event.response as
         | {
             usage?: {
@@ -308,7 +320,7 @@ export class ResponsesEventAdapter {
         choices: [
           {
             index: 0,
-            finish_reason: this.sawToolCall ? "tool_calls" : "stop",
+            finish_reason: type === "response.incomplete" ? "length" : this.sawToolCall ? "tool_calls" : "stop",
             delta: {},
           },
         ],
@@ -359,6 +371,10 @@ export class ResponsesEventAdapter {
 export function responsesToOpenAIResponse(
   body: Record<string, unknown>,
 ): OpenAIResponse {
+  if (body.status === "incomplete") {
+    const error = incompleteError(body)
+    if (error) return error
+  }
   const output = (body.output as Array<Record<string, unknown>> | undefined) ?? []
   let text = ""
   const toolCalls: Array<{
@@ -396,7 +412,7 @@ export function responsesToOpenAIResponse(
     choices: [
       {
         index: 0,
-        finish_reason: toolCalls.length > 0 ? "tool_calls" : "stop",
+        finish_reason: body.status === "incomplete" ? "length" : toolCalls.length > 0 ? "tool_calls" : "stop",
         message: {
           role: "assistant",
           content: text || null,

@@ -7,6 +7,7 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test"
 import {
   sanitizeBeta,
   startServer,
+  setAdapterLogSink,
   type ServerHandle,
 } from "../src/server"
 import { discoverModels, upstreamModels } from "../src/token"
@@ -97,9 +98,12 @@ beforeAll(async () => {
         const model = JSON.parse(nativeCalls[nativeCalls.length - 1]!.body).model
         if (model === "mock-native-reject") {
           return Response.json(
-            { type: "error", error: { message: "unsupported" } },
+            { type: "error", error: { message: "The requested model is not supported", code: "model_not_supported" } },
             { status: 400 },
           )
+        }
+        if (model === "mock-native-temporary" && nativeCalls.length === 1) {
+          return Response.json({ error: { message: "unsupported parameter: temperature" } }, { status: 400 })
         }
         if (JSON.parse(nativeCalls[nativeCalls.length - 1]!.body).stream) {
           return new Response(
@@ -157,6 +161,16 @@ beforeAll(async () => {
               supported_endpoints: ["/v1/messages", "/chat/completions"],
               model_picker_enabled: false,
             },
+            {
+              id: "mock-native-temporary",
+              supported_endpoints: ["/v1/messages", "/chat/completions"],
+              model_picker_enabled: false,
+            },
+            ...["success", "unauthorized"].map((suffix) => ({
+              id: `mock-native-retry-${suffix}`,
+              supported_endpoints: ["/v1/messages", "/chat/completions"],
+              model_picker_enabled: false,
+            })),
             // The real GPT-5.x "luna" shape: Responses API only.
             {
               id: "mock-responses-only",
@@ -394,7 +408,7 @@ describe("adapter server", () => {
     expect(delta.data).toEqual({
       type: "message_delta",
       delta: { stop_reason: "end_turn", stop_sequence: null },
-      usage: { output_tokens: 4 },
+      usage: { input_tokens: 10, output_tokens: 4 },
     })
   })
 
@@ -544,6 +558,7 @@ describe("adapter server", () => {
         .stop_reason,
     ).toBe("tool_use")
     expect((delta.data as Record<string, unknown>).usage).toEqual({
+      input_tokens: 6,
       output_tokens: 3,
     })
   })
@@ -646,6 +661,18 @@ describe("adapter server", () => {
     expect(nativeCalls).toHaveLength(0)
   })
 
+  test("a parameter rejection falls back once without poisoning later native requests", async () => {
+    nativeCalls.length = 0
+    const payload = { model: "mock-native-temporary", max_tokens: 32, messages: [{ role: "user", content: "hi" }] }
+    const first = await post("/v1/messages", payload)
+    expect(first.status).toBe(200)
+    expect((await first.json()).content[0].text).toBe("Hi there")
+    const second = await post("/v1/messages", payload)
+    expect(second.status).toBe(200)
+    expect((await second.json()).content[0].text).toBe("native non-stream")
+    expect(nativeCalls).toHaveLength(2)
+  })
+
   test("upstream connection failures map to Anthropic error bodies", async () => {
     const dead = await startServer({ upstream: "http://127.0.0.1:1" })
     const res = await fetch(`${dead.url}/v1/messages`, {
@@ -714,5 +741,121 @@ describe("the picker against a raw /models payload", () => {
     expect(picker!.options.length).toBe(
       models.filter((m) => m.type === undefined || m.type === "chat").length,
     )
+  })
+})
+
+describe("upstream SSE at EOF", () => {
+  test.each(["", "\n", "\r\n", "\n\n"])("terminal usage survives ending %j", async (ending) => {
+    const terminal = { id: "1", model: "m", choices: [], usage: { prompt_tokens: 45000, completion_tokens: 7, prompt_tokens_details: { cached_tokens: 40000 } } }
+    const text = chunkLine({ content: "한글" }, "stop") + "\n\n" + `data: ${JSON.stringify(terminal)}` + ending
+    const bytes = new TextEncoder().encode(text)
+    const mock = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: () => new Response(new ReadableStream({
+      start(controller) {
+        // Split every byte, including UTF-8 code points and CRLF delimiters.
+        for (const byte of bytes) controller.enqueue(new Uint8Array([byte]))
+        controller.close()
+      },
+    }), { headers: { "content-type": "text/event-stream" } }) })
+    const server = await startServer({ upstream: mock.url.origin })
+    try {
+      const res = await fetch(`${server.url}/v1/messages`, { method: "POST", headers: { ...AUTH, "content-type": "application/json" }, body: JSON.stringify({ model: "m", stream: true, max_tokens: 32, messages: [{ role: "user", content: "hi" }] }) })
+      const events = parseEvents(await res.text())
+      expect(events.find((e) => e.name === "message_delta")?.data.usage).toEqual({ input_tokens: 5000, cache_read_input_tokens: 40000, output_tokens: 7 })
+      expect(events.filter((e) => e.name === "message_stop")).toHaveLength(1)
+      expect(events.find((e) => e.name === "content_block_delta")?.data.delta).toEqual({ type: "text_delta", text: "한글" })
+    } finally {
+      server.stop()
+      mock.stop(true)
+    }
+  })
+})
+
+describe("estimated input budget", () => {
+  test("a large estimate warns without blocking a request the upstream accepts", async () => {
+    const logs: string[] = []
+    setAdapterLogSink((line) => logs.push(line))
+    nativeCalls.length = 0
+    try {
+      const res = await post("/v1/messages", {
+        model: "mock-native", max_tokens: 32,
+        messages: [{ role: "user", content: "x".repeat(800000) }],
+      })
+      expect(res.status).toBe(200)
+      expect((await res.json()).content[0].text).toBe("native non-stream")
+      expect(nativeCalls).toHaveLength(1)
+      expect(logs.some((line) => line.includes("warning: estimated input") && line.includes("forwarding to upstream"))).toBe(true)
+    } finally {
+      setAdapterLogSink((line) => console.log(line))
+    }
+  })
+})
+
+describe("terminal SSE records without a newline", () => {
+  test.each(["chat", "responses"])("%s keeps an explicit tool completion at EOF", async (dialect) => {
+    const records = dialect === "chat" ? [
+      { id: "1", model: "m", choices: [{ index: 0, finish_reason: null, delta: { tool_calls: [{ index: 0, id: "c1", function: { name: "Read", arguments: "{}" } }] } }] },
+      { id: "1", model: "m", choices: [{ index: 0, finish_reason: "tool_calls", delta: {} }] },
+    ] : [
+      { type: "response.output_item.added", item: { type: "function_call", id: "f1", call_id: "c1", name: "Read" } },
+      { type: "response.function_call_arguments.delta", item_id: "f1", delta: "{}" },
+      { type: "response.completed", response: { usage: { input_tokens: 10, output_tokens: 2 } } },
+    ]
+    const mock = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: () => new Response(records.map((r) => `data: ${JSON.stringify(r)}`).join("\n\n"), { headers: { "content-type": "text/event-stream" } }) })
+    const server = await startServer({ upstream: mock.url.origin })
+    try {
+      const res = await fetch(`${server.url}/v1/messages`, {
+        method: "POST", headers: { ...AUTH, "content-type": "application/json" },
+        body: JSON.stringify({ model: dialect === "responses" ? "mock-responses-only" : "m", max_tokens: 32, stream: true, messages: [{ role: "user", content: "hi" }] }),
+      })
+      const events = parseEvents(await res.text())
+      expect(events.find((e) => e.name === "message_delta")?.data.delta).toEqual({ stop_reason: "tool_use", stop_sequence: null })
+      expect(events.filter((e) => e.name === "message_stop")).toHaveLength(1)
+    } finally {
+      server.stop()
+      mock.stop(true)
+    }
+  })
+
+  test("an error at EOF is terminal, without a fake message_stop", async () => {
+    const mock = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: () => new Response('data: {"error":{"message":"upstream failed"}}', { headers: { "content-type": "text/event-stream" } }) })
+    const server = await startServer({ upstream: mock.url.origin })
+    try {
+      const res = await fetch(`${server.url}/v1/messages`, {
+        method: "POST", headers: { ...AUTH, "content-type": "application/json" },
+        body: JSON.stringify({ model: "m", max_tokens: 32, stream: true, messages: [{ role: "user", content: "hi" }] }),
+      })
+      expect(parseEvents(await res.text()).map((e) => e.name)).toEqual(["ping", "error"])
+    } finally {
+      server.stop()
+      mock.stop(true)
+    }
+  })
+})
+
+describe("auth retry across dialect fallbacks", () => {
+  test.each(["success", "unauthorized"])("one auth retry stays bounded through native/chat/Responses: %s", async (outcome) => {
+    const paths: string[] = []
+    const mock = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: (req) => {
+      paths.push(new URL(req.url).pathname)
+      if (paths.length === 1) return new Response("expired", { status: 401 })
+      if (paths.length === 2) return Response.json({ error: { code: "model_not_supported" } }, { status: 400 })
+      if (paths.length === 3) return Response.json({ error: { message: "model is not accessible via the /chat/completions endpoint" } }, { status: 400 })
+      if (outcome === "unauthorized") return new Response("still expired", { status: 401 })
+      return Response.json({ id: "r", output: [{ type: "message", content: [{ type: "output_text", text: "recovered" }] }] })
+    } })
+    const server = await startServer({ upstream: mock.url.origin })
+    try {
+      const res = await fetch(`${server.url}/v1/messages`, {
+        method: "POST", headers: { ...AUTH, "content-type": "application/json" },
+        body: JSON.stringify({ model: `mock-native-retry-${outcome}`, max_tokens: 32, messages: [{ role: "user", content: "hi" }] }),
+      })
+      expect(res.status).toBe(outcome === "success" ? 200 : 401)
+      if (outcome === "success") expect((await res.json()).content[0].text).toBe("recovered")
+      else await res.text()
+      expect(paths).toEqual(["/v1/messages", "/v1/messages", "/chat/completions", "/responses"])
+    } finally {
+      server.stop()
+      mock.stop(true)
+    }
   })
 })

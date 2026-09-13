@@ -226,6 +226,8 @@ export function parseToken(input: string): string | null | undefined {
 /** Why browser control will or will not work, in the words the user needs. */
 export type RegistryStatus = "ok" | "tls" | "expired" | "blocked" | "slow"
 
+const REGISTRY_PROBE_TIMEOUT_MS = 2_500
+
 /**
  * Whether the registry can actually be reached, and if not, why.
  *
@@ -241,7 +243,7 @@ export type RegistryStatus = "ok" | "tls" | "expired" | "blocked" | "slow"
  * from here at all.
  */
 export async function registryStatus(
-  timeoutMs = 2500,
+  timeoutMs = REGISTRY_PROBE_TIMEOUT_MS,
   /** Overridden in tests; the probe has no other way to reach a TLS failure. */
   url = "https://registry.npmjs.org/@playwright/mcp",
 ): Promise<RegistryStatus> {
@@ -370,7 +372,7 @@ export function startupLine(
  * What setup shows before asking anything: the state, without advice to run
  * the very command that is running.
  */
-export function setupNote(installed: boolean): string {
+export function setupNote(installed: boolean, pkg = mcpPackage()): string {
   // Three separate things, and the old wording ran them together: it said
   // "clco registers no browser server", which reads as though the extension
   // WERE the server. It is not - clco registers the server, the extension is
@@ -379,7 +381,7 @@ export function setupNote(installed: boolean): string {
   if (installed) {
     return (
       `${EXTENSION_NAME} found, so both halves are in place:\n` +
-      `  clco  registers ${mcpPackage()} --extension each session\n` +
+      `  clco  registers ${pkg} --extension each session\n` +
       `  you   click the extension to share a tab\n` +
       `Tools then arrive as mcp__playwright__*.\n` +
       `\n` +
@@ -388,7 +390,7 @@ export function setupNote(installed: boolean): string {
   }
   return (
     `Browser control is two halves, and clco only owns one:\n` +
-    `  clco  registers ${mcpPackage()}, which it fetches from npm\n` +
+    `  clco  registers ${pkg}, which it fetches from npm\n` +
     `  you   install one Chrome extension, which clco cannot do\n` +
     `\n` +
     `The extension is what lets that server drive YOUR tab, with your\n` +
@@ -403,7 +405,7 @@ export function setupNote(installed: boolean): string {
   )
 }
 
-export function extensionHint(installed: boolean, token?: string): string {
+export function extensionHint(installed: boolean, token?: string, pkg = mcpPackage()): string {
   if (!installed) {
     return (
       `Browser control is ON, but the Chrome extension it needs is not\n` +
@@ -417,7 +419,7 @@ export function extensionHint(installed: boolean, token?: string): string {
   // stored token is the closest thing to a prediction, since it is exactly
   // what removes the manual connect step.
   return (
-    `${EXTENSION_NAME} found. Registering ${mcpPackage()} --extension\n` +
+    `${EXTENSION_NAME} found. Registering ${pkg} --extension\n` +
     `each session. Tools arrive as mcp__playwright__*.\n` +
     (token
       ? `Token stored, so sessions attach without the connect dialog.`

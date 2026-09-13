@@ -1,6 +1,10 @@
 // Local Anthropic-compatible adapter server. Claude Code talks to this; it
 // translates and forwards to GitHub Copilot.
 
+import { StreamTranslator } from "./stream"
+import { estimateTokens, ONE_MILLION_TOKENS, TOKEN_WARNING_RATIO } from "./tokens"
+import { DialectRouter, type Dialect } from "./route"
+import type { AnthropicRequest, OpenAIRequest, OpenAIResponse, StreamEventData } from "./wire"
 import {
   copilotBaseUrl,
   copilotFetch,
@@ -12,20 +16,12 @@ import {
   getCopilotToken,
   invalidateCopilotToken,
   modelInfo,
-  supportsNativeMessages,
   upstreamModels,
-  type ModelMapping,
 } from "./token"
 import {
-  StreamTranslator,
-  estimateTokens,
   normalizeModel,
   translateRequest,
   translateResponse,
-  type AnthropicRequest,
-  type OpenAIRequest,
-  type OpenAIResponse,
-  type StreamEventData,
 } from "./translate"
 import {
   ResponsesEventAdapter,
@@ -68,7 +64,7 @@ export function sanitizeBeta(
   if (!beta) return beta
   const window =
     modelInfo(model)?.maxPromptTokens ?? modelInfo(model)?.maxContextTokens
-  if ((window ?? 0) >= 1_000_000) return beta
+  if ((window ?? 0) >= ONE_MILLION_TOKENS) return beta
   const kept = beta
     .split(",")
     .map((v) => v.trim())
@@ -149,25 +145,7 @@ function detectVision(payload: OpenAIRequest): boolean {
   )
 }
 
-// Models Copilot only serves through the Responses API (GPT-5.x "luna"
-// family etc.) — remembered after the first chat/completions rejection.
-const responsesOnlyModels = new Set<string>()
-
-/** True when /models says the model serves /responses but not chat. */
-function responsesOnly(model: string): boolean {
-  const endpoints = modelInfo(normalizeModel(model))?.endpoints
-  if (!endpoints || endpoints.length === 0) return false
-  return (
-    endpoints.includes("/responses") &&
-    !endpoints.includes("/chat/completions")
-  )
-}
-
-// Models whose native /v1/messages attempt was rejected — remembered so the
-// translation path is used directly from then on.
-const nativeRejectedModels = new Set<string>()
-
-type Dialect = "native" | "chat" | "responses"
+const routes = new DialectRouter()
 
 type ChatResult =
   | { ok: true; res: Response; dialect: Dialect }
@@ -194,27 +172,14 @@ async function copilotChat(
   )
   const vision = detectVision(payload)
 
-  // Copilot serves Claude models through the native Anthropic endpoint, so
-  // the request can go through untranslated — thinking, cache_control,
-  // effort and tool blocks all stay intact.
-  let useNative =
-    native !== undefined &&
-    !process.env.CLCO_NO_PASSTHROUGH &&
-    supportsNativeMessages(payload.model) &&
-    !nativeRejectedModels.has(payload.model)
-  // Discovery already told us which endpoints this model serves, so honour
-  // that instead of probing /chat/completions and waiting to be rejected —
-  // that guess cost one wasted upstream request per model, which on a
-  // metered plan is a real charge. The learned set still overrides it, so a
-  // wrong or missing declaration recovers exactly as before.
-  let useResponses =
-    responsesOnlyModels.has(payload.model) || responsesOnly(payload.model)
+  const info = modelInfo(payload.model)
+  let dialect = routes.select(payload.model, info, native !== undefined && !process.env.CLCO_NO_PASSTHROUGH)
   let attempt = 0
   while (attempt < 2) {
     const token = mockToken ? "mock" : await getCopilotToken(attempt > 0)
-    const endpoint = useNative
+    const endpoint = dialect === "native"
       ? "/v1/messages"
-      : useResponses
+      : dialect === "responses"
         ? "/responses"
         : "/chat/completions"
     const headers = copilotRequestHeaders(token, {
@@ -222,7 +187,7 @@ async function copilotChat(
       vision,
       accept: payload.stream ? "text/event-stream" : "application/json",
     })
-    if (useNative && native) {
+    if (dialect === "native" && native) {
       // Forward the protocol headers verbatim; the upstream needs them to
       // honour the same betas Claude Code asked for.
       if (native.anthropicVersion) headers["anthropic-version"] = native.anthropicVersion
@@ -232,9 +197,9 @@ async function copilotChat(
     const res = await copilotFetch(`${upstreamBase}${endpoint}`, {
       method: "POST",
       headers,
-      body: useNative
+      body: dialect === "native"
         ? native!.body
-        : useResponses
+        : dialect === "responses"
           ? JSON.stringify(toResponsesRequest(anthropic, allowedEfforts))
           : chatBody,
     })
@@ -251,33 +216,34 @@ async function copilotChat(
       return {
         ok: true,
         res,
-        dialect: useNative ? "native" : useResponses ? "responses" : "chat",
+        dialect,
       }
     }
 
     const text = await res.text()
-    // The native endpoint refused this request shape or model: remember it
-    // and fall back to the translation path within the same budget. Quota,
-    // auth and rate-limit failures are not shape problems, so they surface
+    // A shape rejection falls back for this request. Only model/endpoint
+    // evidence changes future routing. Quota, auth and rate-limit failures
+    // are not shape problems, so they surface
     // as-is rather than burning a second upstream call.
     if (
-      useNative &&
+      dialect === "native" &&
       [400, 404, 415, 422].includes(res.status)
     ) {
       debug("native /v1/messages rejected:", res.status, text.slice(0, 300))
-      nativeRejectedModels.add(payload.model)
-      useNative = false
+      const remembered = routes.rejectNative(payload.model, res.status, text)
+      dialect = routes.translated(payload.model, info)
+      logLine(`[${timestamp()}]   -> ${payload.model}: native rejected (${res.status}); ${dialect} fallback ${remembered ? "remembered for this process" : "for this request only"}`)
       continue
     }
     // Copilot serves some models only via the Responses API; switch and
     // retry within the same attempt budget.
     if (
       res.status === 400 &&
-      !useResponses &&
+      dialect === "chat" &&
       /chat\/completions endpoint/i.test(text)
     ) {
-      responsesOnlyModels.add(payload.model)
-      useResponses = true
+      routes.requireResponses(payload.model)
+      dialect = "responses"
       continue
     }
     return { ok: false, status: res.status, message: friendlyUpstreamError(text) }
@@ -335,8 +301,9 @@ function sseResponse(
         let errored = false
         readLoop: while (true) {
           const { done, value } = await reader.read()
-          if (done || closed) break
-          buffer += decoder.decode(value, { stream: true })
+          if (closed) break
+          buffer += done ? decoder.decode() : decoder.decode(value, { stream: true })
+          if (done && buffer) buffer += "\n"
           let idx: number
           while ((idx = buffer.indexOf("\n")) !== -1) {
             const line = buffer.slice(0, idx).replace(/\r$/, "")
@@ -389,6 +356,7 @@ function sseResponse(
             for (const ev of translator.pushChunk(obj)) send(ev)
             if (closed) break readLoop
           }
+          if (done) break
         }
         if (!errored) {
           for (const ev of translator.finish()) send(ev)
@@ -447,23 +415,13 @@ async function handleMessages(
 
   const info = modelInfo(normalizeModel(payload.model))
   const allowedEfforts = info?.efforts ?? null
-  // The session's auto-compact budget is fixed at launch, so switching to a
-  // smaller model mid-session lets the conversation sail past its real limit
-  // and come back as an opaque upstream 400. This is the only place that
-  // knows which model is actually in play, so the check belongs here.
+  // The local estimate cannot establish overflow across different tokenizers.
+  // Keep requests flowing; the selected upstream is authoritative about fit.
   const limit = info?.maxPromptTokens ?? info?.maxContextTokens
   if (limit) {
     const estimate = estimateTokens(payload)
-    if (estimate > limit * 0.98) {
-      logLine(
-        `[${timestamp()}]   -> 400 over budget (~${estimate} > ${limit})`,
-      )
-      return anthropicError(
-        400,
-        `${payload.model} accepts ${limit.toLocaleString()} input tokens, ` +
-          `this conversation is about ${estimate.toLocaleString()}. ` +
-          `Run /compact, or pick a model with a bigger context in /model.`,
-      )
+    if (estimate > limit * TOKEN_WARNING_RATIO) {
+      logLine(`[${timestamp()}]   -> warning: estimated input ~${estimate}, ${payload.model} limit ${limit}; forwarding to upstream`)
     }
   }
   const upstreamPayload = translateRequest(payload, allowedEfforts)

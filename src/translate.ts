@@ -1,32 +1,29 @@
 // Translation between the Anthropic Messages API (what Claude Code speaks)
 // and GitHub Copilot's OpenAI-style chat/completions API.
 //
-// Request direction happens once per call; the response direction comes in
-// two flavors: non-streaming (translateResponse) and streaming (a
-// StreamTranslator state machine fed OpenAI chunks, emitting Anthropic SSE
-// events).
+// Content classification lives in blocks.ts; wire types in wire.ts;
+// streaming response state lives in stream.ts.
 
-// ---------------------------------------------------------------------------
-// Anthropic types (subset Claude Code actually sends)
-// ---------------------------------------------------------------------------
-
+import type {
+  CacheControl,
+  AnthropicMessage,
+  AnthropicRequest,
+  OpenAITextPart,
+  OpenAIImagePart,
+  OpenAIMessage,
+  OpenAIRequest,
+  OpenAIUsage,
+  OpenAIChoice,
+  OpenAIResponse,
+  AnthropicContentBlock,
+  AnthropicResponse,
+} from "./wire"
 import {
-  type ContentBlock,
   type ImageBlock,
-  type RawBlock,
   type ToolResultBlock,
   type ToolUseBlock,
   classifyContent,
 } from "./blocks"
-
-interface CacheControl {
-  cache_control?: { type?: string } | null
-}
-
-interface AnthropicTextBlock extends CacheControl {
-  type: "text"
-  text: string
-}
 
 function marked(blocks: unknown): boolean {
   return (
@@ -41,37 +38,6 @@ function marked(blocks: unknown): boolean {
 // `copilot_cache_control` rather than the standard `cache_control`.
 const COPILOT_CACHE = { type: "ephemeral" } as const
 
-// blocks.ts owns what a content block IS; this file only renders one into the
-// chat/completions dialect.
-
-interface AnthropicMessage {
-  role: "user" | "assistant"
-  content: string | ContentBlock[]
-}
-
-interface AnthropicTool {
-  name: string
-  description?: string
-  input_schema: Record<string, unknown>
-}
-
-export interface AnthropicRequest {
-  model: string
-  max_tokens: number
-  messages: AnthropicMessage[]
-  system?: string | Array<AnthropicTextBlock>
-  tools?: AnthropicTool[]
-  tool_choice?: { type: "auto" | "any" | "tool" | "none"; name?: string }
-  stream?: boolean
-  temperature?: number
-  top_p?: number
-  stop_sequences?: string[]
-  metadata?: { user_id?: string }
-  thinking?: unknown
-  /** Claude Code's /effort setting rides here (gateway protocol). */
-  output_config?: { effort?: string }
-}
-
 // Copilot declares the reasoning_effort values each model accepts in its
 // /models capabilities. Send the effort only when the model claims it —
 // anything else is dropped rather than risking a 400.
@@ -82,120 +48,6 @@ export function effortFor(
   const effort = payload.output_config?.effort
   if (!effort || !allowed || !allowed.includes(effort)) return undefined
   return effort
-}
-
-// ---------------------------------------------------------------------------
-// OpenAI types (subset Copilot accepts)
-// ---------------------------------------------------------------------------
-
-interface OpenAITextPart {
-  type: "text"
-  text: string
-}
-
-interface OpenAIImagePart {
-  type: "image_url"
-  image_url: { url: string }
-}
-
-type OpenAIContent = string | Array<OpenAITextPart | OpenAIImagePart> | null
-
-interface OpenAIToolCall {
-  id: string
-  type: "function"
-  function: { name: string; arguments: string }
-}
-
-interface OpenAIMessage {
-  role: "system" | "user" | "assistant" | "tool"
-  content: OpenAIContent
-  tool_calls?: OpenAIToolCall[]
-  tool_call_id?: string
-  copilot_cache_control?: { type: "ephemeral" }
-}
-
-export interface OpenAIRequest {
-  model: string
-  messages: OpenAIMessage[]
-  max_tokens?: number
-  stop?: string[] | null
-  stream?: boolean
-  stream_options?: { include_usage: boolean }
-  reasoning_effort?: string
-  temperature?: number
-  top_p?: number
-  user?: string | null
-  tools?: Array<{
-    type: "function"
-    function: {
-      name: string
-      description?: string
-      parameters: Record<string, unknown>
-    }
-  }> | null
-  tool_choice?:
-    | "none"
-    | "auto"
-    | "required"
-    | { type: "function"; function: { name: string } }
-    | null
-}
-
-interface OpenAIUsage {
-  prompt_tokens?: number
-  completion_tokens?: number
-  prompt_tokens_details?: { cached_tokens?: number }
-}
-
-export interface OpenAIChoice {
-  index: number
-  finish_reason: "stop" | "length" | "tool_calls" | "content_filter" | null
-  message?: { role: "assistant"; content: OpenAIContent; tool_calls?: OpenAIToolCall[] }
-  delta?: {
-    role?: string
-    content?: string | null
-    tool_calls?: Array<{
-      index: number
-      id?: string
-      function?: { name?: string; arguments?: string }
-    }>
-  }
-}
-
-export interface OpenAIResponse {
-  id: string
-  model: string
-  choices?: OpenAIChoice[]
-  usage?: OpenAIUsage
-  error?: { message?: string; code?: string | number }
-}
-
-// ---------------------------------------------------------------------------
-// Anthropic response types
-// ---------------------------------------------------------------------------
-
-export type AnthropicContentBlock =
-  | AnthropicTextBlock
-  | ToolUseBlock
-
-export interface AnthropicResponse {
-  id: string
-  type: "message"
-  role: "assistant"
-  model: string
-  content: AnthropicContentBlock[]
-  stop_reason: "end_turn" | "max_tokens" | "tool_use" | null
-  stop_sequence: null
-  usage: {
-    input_tokens: number
-    output_tokens: number
-    cache_read_input_tokens?: number
-  }
-}
-
-export interface StreamEventData {
-  event: string
-  data: Record<string, unknown>
 }
 
 // ---------------------------------------------------------------------------
@@ -454,7 +306,7 @@ export function translateRequest(
 // Response direction: OpenAI -> Anthropic (non-streaming)
 // ---------------------------------------------------------------------------
 
-function mapStopReason(
+export function mapStopReason(
   finish: OpenAIChoice["finish_reason"],
 ): AnthropicResponse["stop_reason"] {
   if (finish === null) return null
@@ -470,7 +322,7 @@ function mapStopReason(
   }
 }
 
-function usageFromOpenAI(usage: OpenAIUsage | undefined) {
+export function usageFromOpenAI(usage: OpenAIUsage | undefined) {
   const cached = usage?.prompt_tokens_details?.cached_tokens
   return {
     input_tokens: Math.max(
@@ -529,259 +381,4 @@ export function translateResponse(upstream: OpenAIResponse): AnthropicResponse {
     stop_sequence: null,
     usage: usageFromOpenAI(upstream.usage),
   }
-}
-
-// ---------------------------------------------------------------------------
-// Response direction: OpenAI SSE chunks -> Anthropic stream events
-// ---------------------------------------------------------------------------
-
-interface ToolTrack {
-  anthropicIndex: number
-  id: string
-  name: string
-  bufferedArgs: string
-  started: boolean
-  open: boolean
-}
-
-export class StreamTranslator {
-  private messageStartSent = false
-  private textOpen = false
-  private textIndex = -1
-  private nextIndex = 0
-  private toolCalls = new Map<number, ToolTrack>()
-  private anyToolStarted = false
-  private latestUsage: OpenAIUsage | undefined
-  private lastFinishReason: OpenAIChoice["finish_reason"] = null
-  private finished = false
-
-  constructor(private model: string) {}
-
-  pushChunk(chunk: OpenAIResponse): StreamEventData[] {
-    // Nothing may be emitted after the message closed.
-    if (this.finished) return []
-    const events: StreamEventData[] = []
-    // Usage may arrive in a dedicated terminal chunk with empty choices
-    // (stream_options include_usage convention); track it from any chunk.
-    if (chunk.usage) this.latestUsage = chunk.usage
-    const choices = Array.isArray(chunk.choices) ? chunk.choices : []
-    const choice = choices[0]
-    if (!choice) return events
-    const delta = choice.delta
-
-    if (!this.messageStartSent) {
-      events.push(this.messageStart(chunk.model || this.model))
-    }
-
-    if (delta?.content) {
-      // Tool blocks must all close before a text block starts (Anthropic
-      // blocks are strictly sequential).
-      this.closeOpenTools(events)
-      if (!this.textOpen) {
-        this.textIndex = this.nextIndex++
-        events.push({
-          event: "content_block_start",
-          data: {
-            type: "content_block_start",
-            index: this.textIndex,
-            content_block: { type: "text", text: "" },
-          },
-        })
-        this.textOpen = true
-      }
-      events.push({
-        event: "content_block_delta",
-        data: {
-          type: "content_block_delta",
-          index: this.textIndex,
-          delta: { type: "text_delta", text: delta.content },
-        },
-      })
-    }
-
-    if (delta?.tool_calls) {
-      for (const call of delta.tool_calls) {
-        let track = this.toolCalls.get(call.index)
-        if (!track) {
-          track = {
-            anthropicIndex: -1,
-            id: "",
-            name: "",
-            bufferedArgs: "",
-            started: false,
-            open: false,
-          }
-          this.toolCalls.set(call.index, track)
-        }
-        // id and name may arrive in separate fragments; only start the block
-        // once both are known.
-        if (call.id) track.id = call.id
-        if (call.function?.name) track.name = call.function.name
-        if (!track.started && track.id && track.name) {
-          if (this.textOpen) {
-            events.push({
-              event: "content_block_stop",
-              data: { type: "content_block_stop", index: this.textIndex },
-            })
-            this.textOpen = false
-          }
-          track.anthropicIndex = this.nextIndex++
-          track.started = true
-          track.open = true
-          this.anyToolStarted = true
-          events.push({
-            event: "content_block_start",
-            data: {
-              type: "content_block_start",
-              index: track.anthropicIndex,
-              content_block: {
-                type: "tool_use",
-                id: track.id,
-                name: track.name,
-                input: {},
-              },
-            },
-          })
-          if (track.bufferedArgs) {
-            events.push(this.jsonDelta(track.anthropicIndex, track.bufferedArgs))
-            track.bufferedArgs = ""
-          }
-        }
-        if (call.function?.arguments) {
-          if (track.started && track.open) {
-            events.push(this.jsonDelta(track.anthropicIndex, call.function.arguments))
-          } else if (track.started) {
-            debugWarn(
-              `dropped ${call.function.arguments.length} chars of late tool arguments (block ${track.anthropicIndex} already closed)`,
-            )
-          } else {
-            // Arguments before id/name: buffer until the block starts.
-            track.bufferedArgs += call.function.arguments
-          }
-        }
-      }
-    }
-
-    // Do NOT close here: with stream_options.include_usage the usage-only
-    // terminal chunk arrives AFTER the finish_reason chunk, and close()
-    // needs it. Store the reason and let finish() (stream end) close.
-    if (choice.finish_reason) {
-      this.lastFinishReason = choice.finish_reason
-    }
-    return events
-  }
-
-  // Upstream ended. Use the stored finish_reason; without one the generation
-  // was truncated (connection death, [DONE] without a terminal chunk),
-  // which Anthropic signals as max_tokens.
-  finish(): StreamEventData[] {
-    if (this.finished) return []
-    return this.close(this.lastFinishReason ?? "length")
-  }
-
-  private jsonDelta(index: number, partialJson: string): StreamEventData {
-    return {
-      event: "content_block_delta",
-      data: {
-        type: "content_block_delta",
-        index,
-        delta: { type: "input_json_delta", partial_json: partialJson },
-      },
-    }
-  }
-
-  private messageStart(model: string): StreamEventData {
-    this.messageStartSent = true
-    const usage = this.latestUsage
-    const cached = usage?.prompt_tokens_details?.cached_tokens
-    return {
-      event: "message_start",
-      data: {
-        type: "message_start",
-        message: {
-          id: `msg_${crypto.randomUUID()}`,
-          type: "message",
-          role: "assistant",
-          content: [],
-          model,
-          stop_reason: null,
-          stop_sequence: null,
-          usage: {
-            input_tokens: Math.max(0, (usage?.prompt_tokens ?? 0) - (cached ?? 0)),
-            output_tokens: 0,
-            ...(cached !== undefined && { cache_read_input_tokens: cached }),
-          },
-        },
-      },
-    }
-  }
-
-  private closeOpenTools(events: StreamEventData[]): void {
-    const open = [...this.toolCalls.values()]
-      .filter((t) => t.open)
-      .sort((a, b) => a.anthropicIndex - b.anthropicIndex)
-    for (const track of open) {
-      events.push({
-        event: "content_block_stop",
-        data: { type: "content_block_stop", index: track.anthropicIndex },
-      })
-      track.open = false
-    }
-  }
-
-  private close(
-    reason: NonNullable<OpenAIChoice["finish_reason"]>,
-  ): StreamEventData[] {
-    if (this.finished) return []
-    this.finished = true
-    const events: StreamEventData[] = []
-    if (!this.messageStartSent) {
-      events.push(this.messageStart(this.model))
-    }
-    this.closeOpenTools(events)
-    if (this.textOpen) {
-      events.push({
-        event: "content_block_stop",
-        data: { type: "content_block_stop", index: this.textIndex },
-      })
-      this.textOpen = false
-    }
-    let stopReason = mapStopReason(reason)
-    if (stopReason === "tool_use" && !this.anyToolStarted) {
-      stopReason = "end_turn"
-    }
-    events.push({
-      event: "message_delta",
-      data: {
-        type: "message_delta",
-        delta: { stop_reason: stopReason, stop_sequence: null },
-        usage: { output_tokens: this.latestUsage?.completion_tokens ?? 0 },
-      },
-    })
-    events.push({ event: "message_stop", data: { type: "message_stop" } })
-    return events
-  }
-}
-
-// ---------------------------------------------------------------------------
-// count_tokens approximation (Claude Code falls back to its own estimate if
-// this endpoint is missing, but a local estimate keeps /context accurate)
-// ---------------------------------------------------------------------------
-
-export function estimateTokens(payload: AnthropicRequest): number {
-  // Base64 image payloads are megabytes of characters worth a fixed ~1.5k
-  // tokens, so counting them raw turns one pasted screenshot into a six-digit
-  // estimate. Replace each with its real cost before measuring.
-  const IMAGE_TOKENS = 1_600
-  let images = 0
-  const text = JSON.stringify(payload.messages ?? "", (key, value) =>
-    key === "data" && typeof value === "string" && value.length > 1024
-      ? (images++, "")
-      : value,
-  )
-  const size =
-    text.length +
-    JSON.stringify(payload.system ?? "").length +
-    JSON.stringify(payload.tools ?? "").length
-  return Math.ceil(size / 3.5) + images * IMAGE_TOKENS
 }

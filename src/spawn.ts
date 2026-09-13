@@ -21,6 +21,7 @@ import {
 } from "./token"
 import { prepareClaudeHome } from "./claudehome"
 import { normalizeModel } from "./translate"
+import { ONE_MILLION_TOKENS, fallbackInputWindow } from "./tokens"
 
 /** Endpoints a model must serve to hold a conversation at all. */
 const CHAT_ENDPOINTS = ["/v1/messages", "/responses", "/chat/completions"]
@@ -35,12 +36,6 @@ const INTERNAL_FAMILIES = new Set([
   "trajectory-compaction",
 ])
 
-// The [1m] suffix is what Claude Code reads as "this model has a 1M window",
-// and server.ts only forwards the matching beta at a real 1M. Claiming it for
-// anything smaller told the client a 224k model was 1M while delivering
-// nothing — an overclaim in exactly the direction that delays auto-compact.
-const ONE_MILLION = 1_000_000
-
 export function windowOf(m: UpstreamModel): number | undefined {
   return m.maxPromptTokens ?? m.maxContextTokens
 }
@@ -52,18 +47,19 @@ export function buildSettingsEnv(
   /** Defaults to the discovery cache; injected directly in tests. */
   modelMeta?: UpstreamModel | null,
 ): Record<string, string> {
-  const selected = defaultModel ?? models.sonnet
+  const selected = defaultModel
   // The selection may be an advertised catalog-form id; the discovery cache
   // is keyed by upstream slug, so resolve before looking it up.
   const info =
-    modelMeta === undefined ? modelInfo(normalizeModel(selected)) : modelMeta
+    modelMeta === undefined ? (selected ? modelInfo(normalizeModel(selected)) : undefined) : modelMeta
   // Claude models are served through Copilot's native Anthropic endpoint, so
   // the adapter forwards thinking blocks untouched; only the translation
   // dialects need them suppressed.
   const native = info?.endpoints.includes("/v1/messages") === true
   // Prefer the upstream's own prompt budget so auto-compact fires before the
   // model rejects the conversation.
-  const window = info?.maxPromptTokens ?? info?.maxContextTokens ?? 160000
+  const fallbackWindow = fallbackInputWindow(upstreamModels().filter(conversational).map(windowOf))
+  const window = info?.maxPromptTokens ?? info?.maxContextTokens ?? fallbackWindow
 
   return {
     ANTHROPIC_BASE_URL: baseUrl,
@@ -208,7 +204,7 @@ export function buildModelPickerFrom(
     // [1m] is the only per-row window channel the schema has, and it is
     // binary: 200k or 1M, nothing between. The real window goes in the
     // description instead.
-    const suffix = (ctx ?? 0) >= ONE_MILLION ? "[1m]" : ""
+    const suffix = (ctx ?? 0) >= ONE_MILLION_TOKENS ? "[1m]" : ""
     // Several slugs share one display name (five are "GPT-4o", two are
     // "GPT-5.6 Luna"), so the subtitle leads with the id: it tells the rows
     // apart without cluttering every title with a parenthetical.
