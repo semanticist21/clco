@@ -1,11 +1,14 @@
 {
-  "name": "clco",
+  "name": "@semanticist14/clco",
   "version": "0.1.0",
   "private": false,
   "type": "module",
   "description": "Run Claude Code on a GitHub Copilot subscription",
   "bin": {
     "clco": "bin/clco"
+  },
+  "publishConfig": {
+    "access": "public"
   },
   "files": [
     "bin",

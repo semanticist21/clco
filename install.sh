@@ -46,7 +46,7 @@ if [ ! -e "$CLCO_DIR" ] && [ -d "$CLCO_DIR.previous/.git" ]; then
 fi
 if [ -d "$CLCO_DIR/.git" ]; then
   log "Updating the existing install: $CLCO_DIR"
-  grep -Eq '^[[:space:]]*"name"[[:space:]]*:[[:space:]]*"clco"[[:space:]]*,?[[:space:]]*$' \
+  grep -Eq '^[[:space:]]*"name"[[:space:]]*:[[:space:]]*"(@semanticist14/)?clco"[[:space:]]*,?[[:space:]]*$' \
     "$CLCO_DIR/package.json" \
     || fail "$CLCO_DIR is a git repo, but not a clco install"
   CURRENT_URL="$(git -C "$CLCO_DIR" remote get-url origin 2>/dev/null || true)"

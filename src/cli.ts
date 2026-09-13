@@ -289,7 +289,9 @@ export async function updateInstall(
     const manifest = JSON.parse(await readFile(join(dir, "package.json"), "utf8")) as {
       name?: string
     }
-    if (manifest.name !== "clco") throw new Error("not clco")
+    if (manifest.name !== "clco" && manifest.name !== "@semanticist14/clco") {
+      throw new Error("not clco")
+    }
   } catch {
     throw new Error("update refused: the target is not a clco installation")
   }
@@ -419,7 +421,7 @@ export async function updateInstall(
 }
 
 export function npmUpdateMessage(): string {
-  return "This clco installation came from npm. Update it with `npm install --global clco@latest`."
+  return "This clco installation came from npm. Update it with `npm install --global @semanticist14/clco@latest`."
 }
 
 async function runUpdate(): Promise<void> {

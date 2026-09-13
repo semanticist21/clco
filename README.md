@@ -25,10 +25,10 @@ $ clco
 From npm (Bun is still required at runtime):
 
 ```sh
-npm install --global clco
+npm install --global @semanticist14/clco
 ```
 
-Update npm installs with `npm install --global clco@latest`.
+Update npm installs with `npm install --global @semanticist14/clco@latest`.
 
 Or use the GitHub installer:
 
