@@ -106,6 +106,8 @@ export interface SetupPrefs {
    * secret — the GitHub token lives in auth.json.
    */
   browserToken?: string
+  /** Register Copilot native web search and the local URL fetcher. */
+  web?: boolean
 }
 
 export interface Prefs {

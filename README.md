@@ -61,17 +61,18 @@ clco
 
 1. **GitHub login**, once — a device-flow code to paste in your browser. The
    token is stored at `~/.config/clco/auth.json` (mode 600).
-2. **Three questions**, once. Re-run them any time with `clco setup`:
+2. **Four questions**, once. Re-run them any time with `clco setup`:
 
    | Question | Default | What it does |
    |---|---|---|
    | Run without permission prompts? | **Yes** | Passes `--dangerously-skip-permissions`, so claude edits files and runs commands without asking. `clco --no-bypass` for one session. |
+   | Replace Claude built-in web search with GitHub Copilot native web search? | **Yes** | Registers native search and a local safe URL fetcher for this session. `clco --no-web` for one session. |
    | Enable Playwright MCP for browser control? | **Yes** | Registers the Playwright MCP server for clco sessions only. **Also needs a Chrome extension you install yourself** — see [Browser control](#browser-control). `clco --no-browser` for one session. |
    | Pick a model each time clco starts? | **Yes** | Shows the model prompt at launch. Answering No reuses your last pick. `clco --no-select` for one session. |
 
 3. **Pick a model**, then claude starts. Switch mid-session with `/model`.
 
-   Answering yes to the first two together is worth understanding: claude runs
+   Answering yes to the permission and browser questions together is worth understanding: claude runs
    without permission prompts, and each session resolves the current
    `@playwright/mcp` release from npm (`bunx -y @playwright/mcp@latest`) and runs
    it with access to the browser tab you share. The version is re-resolved every
@@ -81,6 +82,16 @@ clco
    `--no-bypass` / `--no-browser` skip them for a single run, and
    `CLCO_MCP_PACKAGE` pins or redirects the package — see
    [Browser control](#browser-control).
+
+## Web access
+
+The optional web integration registers two session-only local MCP tools:
+GitHub Copilot native `web_search` and a safe `web_fetch` for public HTML,
+text, JSON, and PDF URLs. It does not use an API key, browser cookies, Jina,
+Firecrawl, or a hidden browser fallback. `web_fetch` blocks private targets,
+re-checks redirects, limits responses to 5 MB, and reports JavaScript-only
+pages clearly so browser control remains a separate choice. Existing installs
+keep this off until `clco setup` is run.
 
 ## Usage
 
