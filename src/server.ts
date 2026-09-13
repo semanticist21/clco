@@ -540,9 +540,14 @@ async function handleMessages(
 // origin we actually bound instead.
 function authorize(req: Request, selfHost: string): Response | null {
   if (req.headers.get("host") !== selfHost) {
+    logLine(`[${timestamp()}]   -> 403 ${new URL(req.url).pathname} host=${req.headers.get("host")}`)
     return anthropicError(403, "host header mismatch")
   }
-  if (req.headers.get("authorization") !== `Bearer ${LOCAL_TOKEN}`) {
+  const auth = req.headers.get("authorization")
+  if (auth !== `Bearer ${LOCAL_TOKEN}`) {
+    // Never log the full value: enough to tell which credential source sent it.
+    const got = auth === null ? "(none)" : auth.startsWith("Bearer ") ? `Bearer ${auth.slice(7, 15)}…(${auth.length - 7} chars)` : `other(${auth.slice(0, 8)}…)`
+    logLine(`[${timestamp()}]   -> 401 ${new URL(req.url).pathname} auth=${got} expected=Bearer ${LOCAL_TOKEN.slice(0, 8)}…`)
     return anthropicError(401, "missing or invalid adapter token")
   }
   return null

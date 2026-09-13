@@ -141,6 +141,16 @@ export function toResponsesRequest(
 
   const effort = effortFor(payload, allowedEfforts)
 
+  // Claude's built-in server-side tools (WebSearch, WebFetch) arrive without
+  // input_schema and cannot be executed by an upstream that only knows
+  // function tools - drop them rather than sending a broken schema. If
+  // tool_choice pinned one of the dropped tools, degrade to "auto", or the
+  // upstream rejects the request with "tool choice not found in tools".
+  const servable = (payload.tools ?? []).filter((t) => t.input_schema)
+  const choice = payload.tool_choice
+  const pinnedMissing =
+    choice?.type === "tool" && !servable.some((t) => t.name === choice.name)
+
   return {
     model: normalizeModel(payload.model),
     ...(instructions && { instructions }),
@@ -150,21 +160,22 @@ export function toResponsesRequest(
     max_output_tokens: payload.max_tokens,
     temperature: payload.temperature,
     top_p: payload.top_p,
-    tools: payload.tools?.map((t) => ({
+    tools: servable.map((t) => ({
       type: "function" as const,
       name: t.name,
       description: t.description,
       parameters: t.input_schema,
     })),
-    tool_choice:
-      payload.tool_choice?.type === "auto"
-        ? "auto"
-        : payload.tool_choice?.type === "none"
-          ? "none"
-          : payload.tool_choice?.type === "any"
-            ? "required"
-            : payload.tool_choice?.name
-              ? { type: "function", name: payload.tool_choice.name }
+    tool_choice: pinnedMissing
+      ? ("auto" as const)
+      : choice?.type === "auto"
+        ? ("auto" as const)
+        : choice?.type === "none"
+          ? ("none" as const)
+          : choice?.type === "any"
+            ? ("required" as const)
+            : choice?.name
+              ? { type: "function" as const, name: choice.name }
               : undefined,
   }
 }

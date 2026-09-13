@@ -46,6 +46,23 @@ const PRIVATE_ENTRIES = new Set([
  * user's file every launch discarded whatever claude had persisted in the
  * private one.
  */
+/**
+ * clco owns routing and auth: ANTHROPIC_BASE_URL and the bearer travel in
+ * the --settings tier. A provider env block in the user's own settings.json
+ * (e.g. z.ai's ANTHROPIC_AUTH_TOKEN) must not survive the copy: claude
+ * applies settings-file env over the child environment, so a surviving
+ * token would override clco's and every request would 401 against the
+ * adapter. ANTHROPIC_MODEL is stripped too: clco pins the session model
+ * itself, and a surviving pin makes every /model switch cosmetic.
+ */
+const ROUTING_ENV = /^ANTHROPIC_(AUTH_TOKEN|API_KEY|BASE_URL|MODEL)$/
+function stripRoutingEnv(parsed: Record<string, unknown>): void {
+  const env = parsed.env as Record<string, unknown> | undefined
+  if (env && typeof env === "object" && !Array.isArray(env)) {
+    for (const key of Object.keys(env)) if (ROUTING_ENV.test(key)) delete env[key]
+  }
+}
+
 async function writeSettings(real: string, home: string): Promise<void> {
   const target = join(home, "settings.json")
   const source = await readFile(join(real, "settings.json"), "utf8").catch(
@@ -57,6 +74,7 @@ async function writeSettings(real: string, home: string): Promise<void> {
   try {
     const parsed = JSON.parse(raw) as Record<string, unknown>
     delete parsed.model
+    stripRoutingEnv(parsed)
     await atomicWrite(target, JSON.stringify(parsed, null, 2) + "\n")
   } catch {
     // claude tolerates comments where JSON.parse does not. A line-based regex
@@ -68,6 +86,7 @@ async function writeSettings(real: string, home: string): Promise<void> {
     try {
       const parsed = JSON.parse(stripJsonComments(raw)) as Record<string, unknown>
       delete parsed.model
+    stripRoutingEnv(parsed)
       await atomicWrite(target, JSON.stringify(parsed, null, 2) + "\n")
     } catch (err) {
       // Neither form parses: keep the previous private file rather than
