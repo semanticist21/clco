@@ -321,7 +321,7 @@ export async function updateInstall(
         `${commandFailure("bun install failed; the previous revision is still active", install)}`,
       )
     }
-    const smoke = run([bunCommand, "run", "src/cli.ts", "version"], stage)
+    const smoke = run([bunCommand, "run", "--no-install", "src/cli.ts", "version"], stage)
     if (smoke.exitCode !== 0) {
       throw new Error(commandFailure("updated checkout failed its smoke test", smoke))
     }

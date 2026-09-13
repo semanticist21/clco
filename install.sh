@@ -66,7 +66,7 @@ if [ -d "$CLCO_DIR/.git" ]; then
     || fail "Could not check out the staged clco revision"
   install_dependencies "$STAGE" \
     || fail "bun install failed - the previous revision is still active"
-  (cd "$STAGE" && bun run src/cli.ts version >/dev/null) \
+  (cd "$STAGE" && bun run --no-install src/cli.ts version >/dev/null) \
     || fail "Updated checkout failed its smoke test - the previous revision is still active"
 
   LIVE_HEAD="$(git -C "$CLCO_DIR" rev-parse HEAD)" \
