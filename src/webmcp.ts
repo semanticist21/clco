@@ -10,7 +10,7 @@ function reply(id: Rpc["id"], result: unknown): void { if (id !== undefined) pro
 function failure(message: string): { content: [{ type: "text"; text: string }]; isError: true } { return { content: [{ type: "text", text: message }], isError: true } }
 
 const tools = [
-  { name: "web_search", description: `Search the web: queries are planned by ${SEARCH_AGENT} and executed live.`, inputSchema: { type: "object", properties: { query: { type: "string" } }, required: ["query"], additionalProperties: false } },
+  { name: "web_search", description: "Search the live web. Use this whenever the user asks to search, look up, or find current information - results are fresh, not from training data.", inputSchema: { type: "object", properties: { query: { type: "string" } }, required: ["query"], additionalProperties: false } },
 ]
 
 async function call(name: string, args: Record<string, unknown>): Promise<unknown> {
@@ -37,7 +37,7 @@ async function handle(line: string): Promise<void> {
   if (!line.trim()) return
   let message: Rpc
   try { message = JSON.parse(line) as Rpc } catch { return }
-  if (message.method === "initialize") return reply(message.id, { protocolVersion: "2024-11-05", capabilities: { tools: {} }, serverInfo: { name: "clco-web", version: "0.1.0" } })
+  if (message.method === "initialize") return reply(message.id, { protocolVersion: "2024-11-05", capabilities: { tools: {} }, serverInfo: { name: "clco-web", version: "0.1.0" }, instructions: "This server provides live web search. Whenever the user asks to search the web, look something up online, or needs current information (news, releases, prices, docs), call its web_search tool instead of answering from memory." })
   if (message.method === "ping") return reply(message.id, {})
   if (message.method === "tools/list") return reply(message.id, { tools })
   if (message.method === "tools/call") { const params = message.params ?? {}; return reply(message.id, await call(String(params.name), (params.arguments ?? {}) as Record<string, unknown>)) }
