@@ -629,6 +629,9 @@ export async function startServer(
   const server = Bun.serve({
     hostname: "127.0.0.1",
     port: opts.port ?? 0,
+    // Search-planner and provider calls can hold the client socket silent
+    // for the whole upstream generation; Bun's 10s default killed those.
+    idleTimeout: 255,
     fetch: (req) =>
       handle(req, upstreamBase, mockToken, selfHost).catch((err) =>
         anthropicError(500, String(err)),

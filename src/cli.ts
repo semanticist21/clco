@@ -844,7 +844,8 @@ async function main(): Promise<void> {
   const browserEnabled =
     setup?.browser === true && args.overrides.browser !== false
   const browserExtension = browserEnabled ? await extensionInstalled() : false
-  const webEnabled = setup?.web === true && args.overrides.web !== false
+  // Web is on unless the user turned it off; absent prefs mean on.
+  const webEnabled = setup?.web !== false && args.overrides.web !== false
   const searchAgent = searchAgentModel(list)
   // Computed from the arguments actually produced: clco stands aside when the
   // user passes their own --mcp-config, and claiming success there would be
