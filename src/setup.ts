@@ -64,8 +64,11 @@ export async function runSetup(): Promise<SetupPrefs> {
     current.bypass,
   )
 
-  // Web defaults to on: search runs through Copilot's search-agent planner
-  // with live local execution. `--no-web` disables it for one run.
+  setup.web = await ask(
+    "Search the web via Copilot's search planner (queries by copilot-search-a, live execution locally)?",
+    current.web ?? true,
+  )
+
   // Claude's own Chrome integration cannot work here, so there is nothing to
   // ask about it - only an alternative to offer.
   setup.browser = await ask(
