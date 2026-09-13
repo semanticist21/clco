@@ -235,8 +235,10 @@ curl -fsSL https://raw.githubusercontent.com/semanticist21/clco/main/uninstall.s
 
    Input token counts are approximate. Near the discovered limit, the adapter
    logs a warning and forwards the request; the upstream decides whether it
-   fits. With no known launch model budget, auto-compact uses at most 128k
-   tokens, lowered to the smallest discovered input budget if needed.
+   fits. Catalog-known Claude rows use Claude Code's own per-model context
+   handling after `/model` switches. If the lineup contains a non-catalog row,
+   clco applies a conservative session ceiling based on the exact selectable
+   rows.
 
 ## Development
 
@@ -259,8 +261,8 @@ CLCO_UPSTREAM=http://127.0.0.1:9099 bun run scripts/mock-upstream.ts
   translated routes. `stop_sequences` are not enforced on Responses-API models.
 - `/effort` is forwarded when the selected model declares that level, and
   dropped otherwise — rows in `/model` say which do not support it.
-- The context window is fixed at launch from the model you start with, so
-  switching to a much smaller one mid-session can exceed its real limit. The
-  adapter catches that and says so rather than letting the request fail
-  upstream.
+- Catalog-known Claude rows recalculate their context handling when `/model`
+  switches. Non-catalog rows use a conservative session ceiling because
+  Claude Code cannot inspect their upstream context limit; this can compact
+  earlier than a larger model requires.
 - License: [MIT](LICENSE)

@@ -35,9 +35,39 @@ const INTERNAL_FAMILIES = new Set([
   "exec-agent",
   "trajectory-compaction",
 ])
+const CLAUDE_COMPACT_FLOOR = 100_000
 
 export function windowOf(m: UpstreamModel): number | undefined {
   return m.maxPromptTokens ?? m.maxContextTokens
+}
+
+/** Reject a known custom model that Claude's global compact setting cannot represent. */
+export function validateModelSelection(
+  selected: string | undefined,
+  list: UpstreamModel[],
+): void {
+  if (!selected) return
+  const normalized = normalizeModel(selected)
+  const model = list.find(
+    (candidate) =>
+      normalizeModel(candidate.id) === normalized ||
+      advertisedId(candidate.id) === normalized,
+  )
+  if (!model || advertisedId(model.id)) return
+  const window = windowOf(model)
+  if (window !== undefined && window < CLAUDE_COMPACT_FLOOR) {
+    throw new Error(
+      `model ${selected} has a ${Math.round(window / 1000)}k context window, below Claude Code's 100k compact floor; choose another model`,
+    )
+  }
+}
+
+function smallestWindow(windows: Array<number | undefined>): number {
+  const fallback = fallbackInputWindow([])
+  const safe = windows.map((n) =>
+    n !== undefined && Number.isFinite(n) && n > 0 ? n : fallback,
+  )
+  return safe.length > 0 ? Math.min(...safe) : fallback
 }
 
 export function buildSettingsEnv(
@@ -56,11 +86,13 @@ export function buildSettingsEnv(
   // the adapter forwards thinking blocks untouched; only the translation
   // dialects need them suppressed.
   const native = info?.endpoints.includes("/v1/messages") === true
-  // Prefer the upstream's own prompt budget so auto-compact fires before the
-  // model rejects the conversation.
-  const fallbackWindow = fallbackInputWindow(upstreamModels().filter(conversational).map(windowOf))
-  const window = info?.maxPromptTokens ?? info?.maxContextTokens ?? fallbackWindow
-
+  const compactWindow = modelMeta === undefined
+    ? compactWindowFor(upstreamModels())
+    : modelMeta === null
+      ? fallbackInputWindow([])
+      : advertisedId(modelMeta.id)
+        ? undefined
+        : Math.max(100_000, smallestWindow([windowOf(modelMeta)]))
   return {
     ANTHROPIC_BASE_URL: baseUrl,
     ANTHROPIC_AUTH_TOKEN: "clco-local",
@@ -83,10 +115,13 @@ export function buildSettingsEnv(
     DISABLE_NON_ESSENTIAL_MODEL_CALLS: "1",
     // Translation dialects drop thinking blocks; the native one keeps them.
     ...(native ? {} : { CLAUDE_CODE_DISABLE_THINKING: "1" }),
-    // Model slugs are unknown to Claude Code's context-window table.
+    // Catalog-known rows let Claude Code recalculate the effective window
+    // when /model switches. Non-catalog rows borrow Claude handling and need
+    // a conservative ceiling because Claude cannot know their real limit.
     CLAUDE_CODE_DISABLE_UNKNOWN_MODEL_WINDOW_ENFORCEMENT: "1",
-    // Never inherit a larger user setting than the upstream actually accepts.
-    CLAUDE_CODE_AUTO_COMPACT_WINDOW: String(window),
+    ...(compactWindow === undefined
+      ? {}
+      : { CLAUDE_CODE_AUTO_COMPACT_WINDOW: String(compactWindow) }),
     // Slow upstream: never abort a stream for idling.
     API_FORCE_IDLE_TIMEOUT: "0",
     API_TIMEOUT_MS: "3000000",
@@ -201,6 +236,11 @@ export function buildModelPickerFrom(
     const borrowed = advertised ? null : resolveBehavesAs(familyOf(m.id), ids)
 
     const ctx = windowOf(m)
+    // Claude Code's global auto-compact override cannot represent a window
+    // below 100k. Do not expose a custom row whose known limit is smaller;
+    // catalog-known rows remain safe because Claude owns their per-model
+    // context handling.
+    if (borrowed && ctx !== undefined && ctx < 100_000) continue
     // [1m] is the only per-row window channel the schema has, and it is
     // binary: 200k or 1M, nothing between. The real window goes in the
     // description instead.
@@ -233,6 +273,26 @@ export function buildModelPickerFrom(
   // Only ever set with a non-empty lineup: replacing the built-in options
   // while offering none of our own leaves /model completely empty.
   return { options: options.slice(0, 200), replaceBuiltInOptions: true }
+}
+
+/**
+ * A global compact ceiling is needed only when the exact selectable lineup
+ * contains a custom row. Catalog-known rows are handled by Claude Code's own
+ * per-model context table after a /model switch.
+ */
+export function compactWindowFor(list: UpstreamModel[]): number | undefined {
+  if (list.length === 0) return fallbackInputWindow([])
+  const picker = buildModelPickerFrom(list)
+  if (!picker) return fallbackInputWindow([])
+  if (!picker.options.some((option) => option.behavesAs)) {
+    return undefined
+  }
+  const byId = new Map(list.map((model) => [normalizeModel(model.id), model]))
+  const windows = picker.options.map((option) => {
+    const model = byId.get(normalizeModel(option.model))
+    return model ? windowOf(model) : undefined
+  })
+  return Math.max(100_000, smallestWindow(windows))
 }
 
 // Selected model first, then native rows, then widest window first.
@@ -288,11 +348,17 @@ export function buildLaunchArgs(plan: LaunchPlan): string[] {
   const userPickedModel = plan.claudeArgs.some(
     (a) => a === "--model" || a.startsWith("--model="),
   )
-  const env = buildSettingsEnv(plan.baseUrl, plan.models, plan.defaultModel)
-  const picker = buildModelPicker(
-    plan.defaultModel ?? plan.models.sonnet,
-    Number(env.CLAUDE_CODE_AUTO_COMPACT_WINDOW),
+  const userModelIndex = plan.claudeArgs.findIndex(
+    (a) => a === "--model" || a.startsWith("--model="),
   )
+  const userModel = userModelIndex < 0
+    ? undefined
+    : plan.claudeArgs[userModelIndex]!.startsWith("--model=")
+      ? plan.claudeArgs[userModelIndex]!.slice("--model=".length)
+      : plan.claudeArgs[userModelIndex + 1]
+  validateModelSelection(userModel ?? plan.defaultModel, upstreamModels())
+  const env = buildSettingsEnv(plan.baseUrl, plan.models, plan.defaultModel)
+  const picker = buildModelPicker(plan.defaultModel ?? plan.models.sonnet)
   const overrides = buildModelOverridesFrom(upstreamModels())
   const configDir = plan.configDir ?? undefined
   // The model rides in the settings blob as well as in --model, because
@@ -328,6 +394,15 @@ export function buildLaunchEnv(
   plan: LaunchPlan,
   extraEnv?: Record<string, string>,
 ): Record<string, string | undefined> {
+  const userModelIndex = plan.claudeArgs.findIndex(
+    (a) => a === "--model" || a.startsWith("--model="),
+  )
+  const userModel = userModelIndex < 0
+    ? undefined
+    : plan.claudeArgs[userModelIndex]!.startsWith("--model=")
+      ? plan.claudeArgs[userModelIndex]!.slice("--model=".length)
+      : plan.claudeArgs[userModelIndex + 1]
+  validateModelSelection(userModel ?? plan.defaultModel, upstreamModels())
   const env = buildSettingsEnv(plan.baseUrl, plan.models, plan.defaultModel)
   const configDir = plan.configDir ?? undefined
   const childEnv: Record<string, string | undefined> = {

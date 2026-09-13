@@ -9,6 +9,8 @@ import {
   buildModelOverridesFrom,
   buildModelPickerFrom,
   buildSettingsEnv,
+  compactWindowFor,
+  validateModelSelection,
 } from "../src/spawn"
 
 describe("buildModelPickerFrom", () => {
@@ -96,7 +98,7 @@ describe("buildModelPickerFrom", () => {
   // client 1M while delivering 200k - the two must agree on the threshold.
   test("[1m] is claimed only at a real 1M window", () => {
     const picker = buildModelPickerFrom([
-      model({ id: "small", maxPromptTokens: 12288 }),
+      model({ id: "small", maxPromptTokens: 100000 }),
       model({ id: "mid", maxPromptTokens: 272000 }),
       model({ id: "big", maxPromptTokens: 917504 }),
       model({ id: "huge", maxPromptTokens: 1000000 }),
@@ -106,6 +108,25 @@ describe("buildModelPickerFrom", () => {
     expect(by("mid").model).toBe("mid")
     expect(by("big").model).toBe("big")
     expect(by("huge").model).toBe("huge[1m]")
+  })
+
+  test("hides custom rows below Claude's supported global compact floor", () => {
+    expect(
+      buildModelPickerFrom([model({ id: "tiny-custom", maxPromptTokens: 64000 })]),
+    ).toBeNull()
+  })
+
+  test("rejects a direct selection of a known sub-floor custom model", () => {
+    expect(() =>
+      validateModelSelection("tiny-custom", [
+        model({ id: "tiny-custom", maxPromptTokens: 64000 }),
+      ]),
+    ).toThrow("below Claude Code's 100k compact floor")
+    expect(() =>
+      validateModelSelection("claude-opus-5", [
+        model({ id: "claude-opus-5", maxPromptTokens: 64000 }),
+      ]),
+    ).not.toThrow()
   })
 
   test("models that cannot hold a conversation are excluded", () => {
@@ -140,6 +161,38 @@ describe("buildModelPickerFrom", () => {
     const big = Array.from({ length: 250 }, (_, i) => model({ id: `m-${i}` }))
     expect(buildModelPickerFrom(big)!.options).toHaveLength(200)
   })
+
+  test("uses Claude's dynamic window for catalog rows and a cap for custom rows", () => {
+    expect(
+      compactWindowFor([
+        model({ id: "claude-opus-5", maxPromptTokens: 200000 }),
+        model({ id: "claude-sonnet-5", maxPromptTokens: 400000 }),
+      ]),
+    ).toBeUndefined()
+    expect(
+      compactWindowFor([
+        model({ id: "claude-opus-5", maxPromptTokens: 200000 }),
+        model({ id: "gpt-6-astra", maxPromptTokens: 272000 }),
+      ]),
+    ).toBe(200000)
+    expect(compactWindowFor([])).toBe(128000)
+    expect(
+      compactWindowFor([
+        model({ id: "claude-opus-5", maxPromptTokens: 272000 }),
+        model({ id: "custom-without-window" }),
+      ]),
+    ).toBe(128000)
+    const prev = process.env.CLCO_MIN_WINDOW
+    try {
+      process.env.CLCO_MIN_WINDOW = "500000"
+      expect(
+        compactWindowFor([model({ id: "custom", maxPromptTokens: 272000 })]),
+      ).toBe(128000)
+    } finally {
+      if (prev === undefined) delete process.env.CLCO_MIN_WINDOW
+      else process.env.CLCO_MIN_WINDOW = prev
+    }
+  })
 })
 
 describe("buildModelOverridesFrom", () => {
@@ -156,10 +209,10 @@ describe("buildModelOverridesFrom", () => {
 describe("buildSettingsEnv", () => {
   const models = { opus: "o", sonnet: "s", haiku: "h", fable: "f" }
 
-  test("native models keep thinking and use the upstream prompt budget", () => {
+  test("catalog-native models keep thinking without pinning a global compact window", () => {
     const env = buildSettingsEnv("http://127.0.0.1:1", models, "mock-native", {
-      id: "mock-native",
-      name: "Mock Native",
+      id: "claude-opus-5",
+      name: "Claude Opus",
       endpoints: ["/v1/messages", "/chat/completions"],
       efforts: ["low", "medium", "high"],
       maxPromptTokens: 200000,
@@ -168,7 +221,7 @@ describe("buildSettingsEnv", () => {
     // Pinning ANTHROPIC_MODEL makes every /model switch cosmetic — claude
     // keeps using the pinned id and says so. The choice travels as --model.
     expect(env.ANTHROPIC_MODEL).toBeUndefined()
-    expect(env.CLAUDE_CODE_AUTO_COMPACT_WINDOW).toBe("200000")
+    expect(env.CLAUDE_CODE_AUTO_COMPACT_WINDOW).toBeUndefined()
     expect(env.CLAUDE_CODE_DISABLE_THINKING).toBeUndefined()
   })
 
@@ -219,13 +272,13 @@ describe("duplicate display names", () => {
     const picker = buildModelPickerFrom(
       [m("small", "Small"), m("big", "Big")].map((x, i) => ({
         ...x,
-        maxPromptTokens: i === 0 ? 12288 : 917504,
+        maxPromptTokens: i === 0 ? 100000 : 917504,
       })),
       { sessionWindow: 200000 },
     )!
     const by = (id: string) =>
       picker.options.find((o) => o.description!.startsWith(id))!
-    expect(by("small").description).toContain("! caps at 12k")
+    expect(by("small").description).toContain("! caps at 100k")
     expect(by("big").description).not.toContain("⚠")
   })
 })
