@@ -44,6 +44,9 @@ describe("prepareClaudeHome", () => {
     expect((await lstat(join(dir!, "settings.json"))).isSymbolicLink()).toBe(false)
     expect(settings.model).toBeUndefined()
     expect(settings.env).toEqual({ KEEP: "1" })
+    // The built-in WebSearch can never work through the adapter; deny it so
+    // the model reaches for clco_web's search instead.
+    expect(settings.permissions.deny).toContain("WebSearch")
 
     // Writing through the private dir must never reach the user's file.
     await writeFile(

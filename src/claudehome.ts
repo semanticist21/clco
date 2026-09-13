@@ -63,6 +63,18 @@ function stripRoutingEnv(parsed: Record<string, unknown>): void {
   }
 }
 
+// Claude's built-in WebSearch executes server-side on Anthropic's API and can
+// never work through the adapter. Denying it in the private copy keeps the
+// model from calling a tool that always no-ops and steering it toward the
+// clco_web search tool instead. The user's own file is never touched.
+function denyServerWebSearch(parsed: Record<string, unknown>): void {
+  const permissions = (parsed.permissions ?? {}) as Record<string, unknown>
+  const deny = Array.isArray(permissions.deny) ? [...permissions.deny] : []
+  if (!deny.includes("WebSearch")) deny.push("WebSearch")
+  permissions.deny = deny
+  parsed.permissions = permissions
+}
+
 async function writeSettings(real: string, home: string): Promise<void> {
   const target = join(home, "settings.json")
   const source = await readFile(join(real, "settings.json"), "utf8").catch(
@@ -75,6 +87,7 @@ async function writeSettings(real: string, home: string): Promise<void> {
     const parsed = JSON.parse(raw) as Record<string, unknown>
     delete parsed.model
     stripRoutingEnv(parsed)
+    denyServerWebSearch(parsed)
     await atomicWrite(target, JSON.stringify(parsed, null, 2) + "\n")
   } catch {
     // claude tolerates comments where JSON.parse does not. A line-based regex
@@ -87,6 +100,7 @@ async function writeSettings(real: string, home: string): Promise<void> {
       const parsed = JSON.parse(stripJsonComments(raw)) as Record<string, unknown>
       delete parsed.model
     stripRoutingEnv(parsed)
+    denyServerWebSearch(parsed)
       await atomicWrite(target, JSON.stringify(parsed, null, 2) + "\n")
     } catch (err) {
       // Neither form parses: keep the previous private file rather than
