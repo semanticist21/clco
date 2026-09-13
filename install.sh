@@ -12,36 +12,99 @@ fail() { printf '\033[1;31mError:\033[0m %s\n' "$*" >&2; exit 1; }
 
 command -v git >/dev/null 2>&1 || fail "git is required - please install it first"
 
-# --- Bun (auto-install when missing) ---------------------------------------
+install_dependencies() {
+  local target="$1"
+  log "Installing dependencies (bun install)"
+  if (cd "$target" && bun install --frozen-lockfile >/dev/null 2>&1); then
+    return 0
+  fi
+  if (cd "$target" && bun install --no-save >/dev/null 2>&1); then
+    return 0
+  fi
+  log "bun install failed - full output:"
+  (cd "$target" && bun install --no-save) || return 1
+}
+
+# --- Bun --------------------------------------------------------------------
 if ! command -v bun >/dev/null 2>&1; then
-  log "Bun not found - installing it with the official script"
-  curl -fsSL https://bun.sh/install | bash
-  export PATH="$HOME/.bun/bin:$PATH"
-  command -v bun >/dev/null 2>&1 || fail "Could not verify the Bun install - reopen your terminal and retry"
+  fail "Bun is not installed. Please install using: curl -fsSL https://bun.sh/install | bash. Or visit https://bun.sh/docs/installation to install it."
 fi
 
 # --- Source ------------------------------------------------------------------
+if [ ! -e "$CLCO_DIR" ] && [ -d "$CLCO_DIR.previous/.git" ]; then
+  log "Recovering the previous install after an interrupted update"
+  mv "$CLCO_DIR.previous" "$CLCO_DIR" \
+    || fail "Could not recover the previous clco install"
+fi
 if [ -d "$CLCO_DIR/.git" ]; then
   log "Updating the existing install: $CLCO_DIR"
-  # Pre-rename clones carry a stale origin — retarget before pulling.
-  CURRENT_URL="$(git -C "$CLCO_DIR" remote get-url origin 2>/dev/null || true)"
-  case "$CURRENT_URL" in
-    *semanticist21/clco.git) ;;
-    https://*|git@github.com:*)
-      [ -n "$CURRENT_URL" ] && git -C "$CLCO_DIR" remote set-url origin "$REPO"
-      ;;
-  esac
-  git -C "$CLCO_DIR" pull --ff-only >/dev/null 2>&1 || fail "Update failed - run git pull in $CLCO_DIR to see why"
+  [ -z "$(git -C "$CLCO_DIR" status --porcelain)" ] \
+    || fail "Update aborted - local changes exist in $CLCO_DIR; commit or stash them first"
+  CURRENT_HEAD="$(git -C "$CLCO_DIR" rev-parse HEAD)" \
+    || fail "Could not read the current revision in $CLCO_DIR"
+  BRANCH="$(git -C "$CLCO_DIR" rev-parse --abbrev-ref HEAD)" \
+    || fail "Could not read the current branch in $CLCO_DIR"
+  [ "$BRANCH" != HEAD ] || fail "Update requires a checked-out branch in $CLCO_DIR"
+
+  UPDATE_LOCK="$CLCO_DIR.update.lock"
+  mkdir "$UPDATE_LOCK" \
+    || fail "Another clco update is already running (or left an update lock; remove it after verifying)"
+  STAGE_ROOT="$(mktemp -d "$(dirname "$CLCO_DIR")/.clco-install.XXXXXX")" \
+    || fail "Could not create a temporary update directory"
+  STAGE="$STAGE_ROOT/app"
+  trap 'rm -rf "$STAGE_ROOT" "$UPDATE_LOCK"' EXIT
+  git clone --local "$CLCO_DIR" "$STAGE" >/dev/null \
+    || fail "Could not create a staged update checkout"
+  git -C "$STAGE" remote set-url origin "$REPO" 2>/dev/null \
+    || git -C "$STAGE" remote add origin "$REPO" \
+    || fail "Could not set the canonical clco origin"
+  git -C "$STAGE" fetch --quiet origin "$BRANCH" \
+    || fail "Could not fetch the latest clco revision"
+  git -C "$STAGE" merge-base --is-ancestor "$CURRENT_HEAD" "origin/$BRANCH" \
+    || fail "Update is not a fast-forward - resolve the branch manually first"
+  git -C "$STAGE" checkout --quiet -B "$BRANCH" "origin/$BRANCH" \
+    || fail "Could not check out the staged clco revision"
+  install_dependencies "$STAGE" \
+    || fail "bun install failed - the previous revision is still active"
+  (cd "$STAGE" && bun run src/cli.ts version >/dev/null) \
+    || fail "Updated checkout failed its smoke test - the previous revision is still active"
+
+  LIVE_HEAD="$(git -C "$CLCO_DIR" rev-parse HEAD)" \
+    || fail "Could not re-check the live revision before activation"
+  LIVE_STATUS="$(git -C "$CLCO_DIR" status --porcelain)" \
+    || fail "Could not re-check the live checkout before activation"
+  [ "$LIVE_HEAD" = "$CURRENT_HEAD" ] && [ -z "$LIVE_STATUS" ] \
+    || fail "The live checkout changed while it was being updated"
+  git -C "$CLCO_DIR" config --replace-all remote.origin.url "$REPO" \
+    || fail "Could not sanitize the clco origin before activation"
+  git -C "$CLCO_DIR" config --unset-all remote.origin.pushurl 2>/dev/null || true
+  [ -z "$(git -C "$CLCO_DIR" config --get-all remote.origin.pushurl 2>/dev/null || true)" ] \
+    || fail "Could not remove credentials from the clco origin before activation"
+  if [ -e "$CLCO_DIR.previous" ]; then
+    [ -d "$CLCO_DIR.previous/.git" ] \
+      || fail "$CLCO_DIR.previous is not a clco rollback directory - refusing to replace it"
+    rm -rf "$CLCO_DIR.previous"
+  fi
+  mv "$CLCO_DIR" "$CLCO_DIR.previous" \
+    || fail "Could not prepare the existing install for activation"
+  if ! mv "$STAGE" "$CLCO_DIR"; then
+    mv "$CLCO_DIR.previous" "$CLCO_DIR" || true
+    fail "Could not activate the staged install"
+  fi
+  trap - EXIT
+  rm -rf "$STAGE_ROOT"
+  rmdir "$UPDATE_LOCK" 2>/dev/null || true
+  NEEDS_INSTALL=0
 else
   [ -e "$CLCO_DIR" ] && fail "$CLCO_DIR already exists and is not a git repo - remove it and retry"
   log "Cloning into $CLCO_DIR"
   git clone --depth 1 "$REPO" "$CLCO_DIR"
+  NEEDS_INSTALL=1
 fi
 
-log "Installing dependencies (bun install)"
-(cd "$CLCO_DIR" && bun install --frozen-lockfile >/dev/null 2>&1) \
-  || (cd "$CLCO_DIR" && bun install >/dev/null 2>&1) \
-  || { log "bun install failed - full output:"; (cd "$CLCO_DIR" && bun install) || fail "bun install failed"; }
+if [ "$NEEDS_INSTALL" = 1 ]; then
+  install_dependencies "$CLCO_DIR" || fail "bun install failed"
+fi
 
 # --- claude CLI (required by clco; offer to install) -------------------------
 CLAUDE_WARN="Install it later with: curl -fsSL https://claude.ai/install.sh | bash"

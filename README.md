@@ -27,11 +27,20 @@ curl -fsSL https://raw.githubusercontent.com/semanticist21/clco/main/install.sh 
 ```
 
 Installs to `~/.local/share/clco`, launcher at `~/.local/bin/clco`.
-Elsewhere: `CLCO_DIR=~/somewhere curl -fsSL ... | bash`
+For custom paths: `curl -fsSL ... | CLCO_DIR=~/somewhere BIN_DIR=~/bin bash`.
+The same `CLCO_DIR` and `BIN_DIR` values can be passed to `uninstall.sh`.
 
 Needs the [claude CLI](https://claude.com/claude-code) (the installer offers to
 fetch it), a GitHub account with Copilot, and [Bun](https://bun.sh) (installed
-automatically if missing).
+before running the installer).
+
+If you need to install Bun yourself:
+
+```sh
+curl -fsSL https://bun.sh/install | bash
+```
+
+Reopen your terminal afterwards so `bun` is on your `PATH`.
 
 ## First run
 
@@ -138,7 +147,19 @@ Pinning is not an offline mode: browser control needs npm either way.
 Nothing clco reads from your disk leaves the machine. Its outbound requests are
 GitHub login, the Copilot token exchange, the model list, your chat itself,
 plus — with browser control on — resolving `@playwright/mcp` against npm each
-session, and `git pull` when you run `clco update`.
+session, and checking GitHub for a staged update when you run `clco update`.
+
+`clco update` installs and smoke-tests the new revision in a temporary checkout,
+then swaps it in only after those checks pass. Local changes or a non-fast-forward
+branch stop the update before the live install is touched.
+
+It first tries `bun install --frozen-lockfile`. If the installed Bun cannot read
+this lockfile format, it falls back to `bun install --no-save`, which installs
+dependencies without rewriting `bun.lock`; using a current Bun release is still
+recommended.
+
+If you installed with custom `CLCO_DIR` or `BIN_DIR` values before launcher v3,
+re-run the installer once with those same values so the launcher can migrate.
 
 - **Chrome, Chromium and Edge profile directories** — directory *names* only, to
   see whether the Playwright extension is installed.
@@ -182,6 +203,10 @@ curl -fsSL https://raw.githubusercontent.com/semanticist21/clco/main/uninstall.s
 
 # also wipe ~/.config/clco, token included
 curl -fsSL https://raw.githubusercontent.com/semanticist21/clco/main/uninstall.sh | bash -s -- --full
+
+# custom installation paths
+curl -fsSL https://raw.githubusercontent.com/semanticist21/clco/main/uninstall.sh \
+  | CLCO_DIR="$HOME/somewhere" BIN_DIR="$HOME/bin" bash
 ```
 
 ## How it works

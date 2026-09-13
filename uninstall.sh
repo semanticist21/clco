@@ -18,6 +18,16 @@ if [ -d "$CLCO_DIR" ]; then
   fi
   rm -rf "$CLCO_DIR"; log "Removed: $CLCO_DIR"; removed=1
 fi
+if [ -d "$CLCO_DIR.previous" ]; then
+  [ -d "$CLCO_DIR.previous/.git" ] \
+    || fail "$CLCO_DIR.previous is not a clco rollback install - check it yourself before deleting"
+  rm -rf "$CLCO_DIR.previous"; log "Removed: $CLCO_DIR.previous"; removed=1
+fi
+if [ -d "$CLCO_DIR.update.lock" ]; then
+  rmdir "$CLCO_DIR.update.lock" \
+    || fail "$CLCO_DIR.update.lock is not empty - verify no update is running before removing it"
+  log "Removed stale update lock: $CLCO_DIR.update.lock"; removed=1
+fi
 
 if [ "${1:-}" = "--full" ]; then
   if [ -d "$HOME/.config/clco" ]; then

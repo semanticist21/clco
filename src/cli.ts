@@ -4,10 +4,10 @@
 // claude launched with injected settings.
 
 import * as p from "@clack/prompts"
-import { existsSync, mkdirSync } from "node:fs"
-import { appendFile, readFile } from "node:fs/promises"
+import { existsSync, mkdirSync, renameSync } from "node:fs"
+import { appendFile, mkdir, mkdtemp, readFile, rename, rm } from "node:fs/promises"
 import { homedir } from "node:os"
-import { join } from "node:path"
+import { dirname, join } from "node:path"
 import { clearAuth, loadPrefs, savePrefs, saveAuth } from "./config"
 import { ensureGithubToken, runDeviceFlow } from "./auth"
 import {
@@ -212,12 +212,197 @@ async function step<T>(name: string, fn: () => Promise<T>): Promise<T> {
 // Where the running installation lives: explicit env from the installed
 // launcher, then the standard install location, then a dev checkout.
 function appDir(): string | null {
-  if (process.env.CLCO_APP_DIR) return process.env.CLCO_APP_DIR
+  const recover = (candidate: string): string | null => {
+    if (existsSync(join(candidate, ".git"))) return candidate
+    const previous = `${candidate}.previous`
+    if (!existsSync(candidate) && existsSync(join(previous, ".git"))) {
+      try {
+        renameSync(previous, candidate)
+      } catch {
+        return null
+      }
+    }
+    return existsSync(join(candidate, ".git")) ? candidate : null
+  }
+  if (process.env.CLCO_APP_DIR) return recover(process.env.CLCO_APP_DIR)
   const installed = join(homedir(), ".local", "share", "clco")
-  if (existsSync(join(installed, ".git"))) return installed
+  const recovered = recover(installed)
+  if (recovered) return recovered
   const devRoot = join(import.meta.dir, "..")
-  if (existsSync(join(devRoot, ".git"))) return devRoot
-  return null
+  return recover(devRoot)
+}
+
+const CANONICAL_REPOSITORY = "https://github.com/semanticist21/clco.git"
+
+/** Update one checkout without changing it until the replacement is healthy. */
+export async function updateInstall(
+  dir: string,
+  binDir: string,
+  canonical = CANONICAL_REPOSITORY,
+  bunCommand = "bun",
+): Promise<void> {
+  console.error(`... updating: ${dir}`)
+  if (bunCommand === "bun" && !Bun.which("bun")) {
+    throw new Error(
+      "Bun is required to update clco. Install it with `curl -fsSL https://bun.sh/install | bash`, then reopen your terminal.",
+    )
+  }
+
+  const lock = `${dir}.update.lock`
+  try {
+    await mkdir(lock)
+  } catch {
+    throw new Error(
+      "another clco update is already running (or left an update lock; remove the lock after verifying)",
+    )
+  }
+
+  try {
+    const run = (args: string[], cwd?: string) =>
+      Bun.spawnSync(args, { cwd, stdout: "pipe", stderr: "pipe" })
+  const output = (result: { stdout: Uint8Array; stderr: Uint8Array }) =>
+    (result.stderr.toString().trim() || result.stdout.toString().trim()).replace(
+      /([a-z][a-z0-9+.-]*:\/\/)([^/\s@]+)@/gi,
+      "$1[redacted]@",
+    )
+  const commandFailure = (name: string, result: { stdout: Uint8Array; stderr: Uint8Array }) =>
+    `${name}: ${output(result) || "unknown error"}`
+
+  // Never mutate an install that contains local work. The staged checkout is
+  // what makes dependency failures safe: the live revision and node_modules
+  // stay untouched until the new checkout passes both install and smoke test.
+  const status = run(["git", "-C", dir, "status", "--porcelain"])
+  if (status.exitCode !== 0) throw new Error(commandFailure("git status failed", status))
+  if (status.stdout.toString().trim()) {
+    throw new Error("update aborted: local changes exist; commit or stash them first")
+  }
+  const currentHead = run(["git", "-C", dir, "rev-parse", "HEAD"])
+  if (currentHead.exitCode !== 0) {
+    throw new Error(commandFailure("could not read current revision", currentHead))
+  }
+  const branch = run(["git", "-C", dir, "rev-parse", "--abbrev-ref", "HEAD"])
+  if (branch.exitCode !== 0 || branch.stdout.toString().trim() === "HEAD") {
+    throw new Error("update requires a checked-out branch")
+  }
+  const branchName = branch.stdout.toString().trim()
+  const stageRoot = await mkdtemp(join(dirname(dir), ".clco-update-"))
+  const stage = join(stageRoot, "app")
+
+  try {
+    const clone = run(["git", "clone", "--local", dir, stage])
+    if (clone.exitCode !== 0) throw new Error(commandFailure("staging checkout failed", clone))
+
+    // A legacy install may have a stale or credential-bearing origin. The
+    // staged clone never contacts it: replace it before the fetch and never
+    // print the old URL.
+    let origin = run(["git", "-C", stage, "remote", "set-url", "origin", canonical])
+    if (origin.exitCode !== 0) {
+      origin = run(["git", "-C", stage, "remote", "add", "origin", canonical])
+    }
+    if (origin.exitCode !== 0) {
+      throw new Error(commandFailure("could not set the canonical origin", origin))
+    }
+    const fetch = run(["git", "-C", stage, "fetch", "--quiet", "origin", branchName])
+    if (fetch.exitCode !== 0) throw new Error(commandFailure("git fetch failed", fetch))
+    const remoteHead = `origin/${branchName}`
+    const fastForward = run(["git", "-C", stage, "merge-base", "--is-ancestor", currentHead.stdout.toString().trim(), remoteHead])
+    if (fastForward.exitCode !== 0) {
+      throw new Error("update is not a fast-forward; resolve the branch manually before updating")
+    }
+    const checkout = run(["git", "-C", stage, "checkout", "--quiet", "-B", branchName, remoteHead])
+    if (checkout.exitCode !== 0) throw new Error(commandFailure("staged checkout failed", checkout))
+
+    let install = run([bunCommand, "install", "--frozen-lockfile"], stage)
+    if (install.exitCode !== 0) {
+      install = run([bunCommand, "install", "--no-save"], stage)
+    }
+    if (install.exitCode !== 0) {
+      throw new Error(
+        `${commandFailure("bun install failed; the previous revision is still active", install)}`,
+      )
+    }
+    const smoke = run([bunCommand, "run", "src/cli.ts", "version"], stage)
+    if (smoke.exitCode !== 0) {
+      throw new Error(commandFailure("updated checkout failed its smoke test", smoke))
+    }
+
+    // Detect another updater or a local process changing the live checkout
+    // while the staged work was running.
+    const liveHead = run(["git", "-C", dir, "rev-parse", "HEAD"])
+    const liveStatus = run(["git", "-C", dir, "status", "--porcelain"])
+    if (
+      liveHead.exitCode !== 0 ||
+      liveHead.stdout.toString().trim() !== currentHead.stdout.toString().trim() ||
+      liveStatus.exitCode !== 0 ||
+      liveStatus.stdout.toString().trim()
+    ) {
+      throw new Error("update aborted: the live checkout changed while it was being updated")
+    }
+
+    const sanitizedOrigin = run([
+      "git",
+      "-C",
+      dir,
+      "config",
+      "--replace-all",
+      "remote.origin.url",
+      canonical,
+    ])
+    if (sanitizedOrigin.exitCode !== 0) {
+      throw new Error(commandFailure("could not sanitize the live origin", sanitizedOrigin))
+    }
+    run(["git", "-C", dir, "config", "--unset-all", "remote.origin.pushurl"])
+    const remainingPushUrl = run([
+      "git",
+      "-C",
+      dir,
+      "config",
+      "--get-all",
+      "remote.origin.pushurl",
+    ])
+    if (remainingPushUrl.stdout.toString().trim()) {
+      throw new Error("could not remove credentials from the live origin")
+    }
+
+    const previous = `${dir}.previous`
+    if (existsSync(previous) && !existsSync(join(previous, ".git"))) {
+      throw new Error("refusing to replace a non-clco rollback directory")
+    }
+    await rm(previous, { recursive: true, force: true })
+    await rename(dir, previous)
+    try {
+      await rename(stage, dir)
+    } catch (err) {
+      await rename(previous, dir)
+      throw err
+    }
+
+    // Refresh the launcher too. It used to be baked once by install.sh, so an
+    // existing install never picked up launcher changes no matter how often it
+    // updated. A launcher failure is non-fatal because it still points at the
+    // same app directory.
+    const launcher = run([
+      "bash",
+      join(dir, "scripts", "write-launcher.sh"),
+      dir,
+      binDir,
+      bunCommand,
+    ])
+    if (launcher.exitCode === 0) {
+      console.error(`... launcher updated: ${join(binDir, "clco")}`)
+    } else {
+      console.error(
+        `! launcher update failed - re-run install.sh (${output(launcher) || "unknown error"})`,
+      )
+    }
+    const head = run(["git", "-C", dir, "rev-parse", "--short", "HEAD"])
+    console.error(`+ updated (${head.stdout.toString().trim()}) - applies from the next run`)
+  } finally {
+    await rm(stageRoot, { recursive: true, force: true })
+  }
+  } finally {
+    await rm(lock, { recursive: true, force: true })
+  }
 }
 
 async function runUpdate(): Promise<void> {
@@ -227,52 +412,12 @@ async function runUpdate(): Promise<void> {
       "no installation to update (need an install directory or git repo)",
     )
   }
-  console.error(`... updating: ${dir}`)
-  // Pre-rename clones carry a stale origin — retarget before pulling.
-  const CANONICAL = "https://github.com/semanticist21/clco.git"
-  const remote = Bun.spawnSync(["git", "-C", dir, "remote", "get-url", "origin"], {
-    stdout: "pipe",
-    stderr: "pipe",
-  })
-  const url = remote.stdout.toString().trim()
-  if (remote.exitCode === 0 && url && !url.endsWith("semanticist21/clco.git")) {
-    console.error(`... retargeting origin: ${url} -> ${CANONICAL}`)
-    Bun.spawnSync(["git", "-C", dir, "remote", "set-url", "origin", CANONICAL])
-  }
-  const pull = Bun.spawnSync(["git", "-C", dir, "pull", "--ff-only"], {
-    stdout: "pipe",
-    stderr: "pipe",
-  })
-  if (pull.exitCode !== 0) {
-    throw new Error(
-      `git pull failed: ${pull.stderr.toString().trim() || pull.stdout.toString().trim()}`,
-    )
-  }
-  const inst = Bun.spawnSync(["bun", "install"], {
-    cwd: dir,
-    stdout: "pipe",
-    stderr: "pipe",
-  })
-  if (inst.exitCode !== 0) throw new Error("bun install failed")
-  // Refresh the launcher too. It used to be baked once by install.sh, so an
-  // existing install never picked up launcher changes no matter how often it
-  // updated.
-  const binDir = join(homedir(), ".local", "bin")
-  const launcher = Bun.spawnSync(
-    ["bash", join(dir, "scripts", "write-launcher.sh"), dir, binDir],
-    { stdout: "pipe", stderr: "pipe" },
+  await updateInstall(
+    dir,
+    process.env.CLCO_BIN_DIR ?? join(homedir(), ".local", "bin"),
+    CANONICAL_REPOSITORY,
+    process.env.CLCO_BUN_BIN ?? "bun",
   )
-  if (launcher.exitCode === 0) {
-    console.error(`... launcher updated: ${join(binDir, "clco")}`)
-  } else {
-    console.error(
-      `! launcher update failed - re-run install.sh (${launcher.stderr.toString().trim()})`,
-    )
-  }
-  const head = Bun.spawnSync(["git", "-C", dir, "rev-parse", "--short", "HEAD"], {
-    stdout: "pipe",
-  })
-  console.error(`+ updated (${head.stdout.toString().trim()}) - applies from the next run`)
 }
 
 // Show what this account can actually reach: which models are enabled, which
@@ -422,7 +567,7 @@ async function reportBrowserNotes(): Promise<void> {
 }
 
 /** Matches LAUNCHER_VERSION in scripts/write-launcher.sh. */
-const LAUNCHER_VERSION = 2
+const LAUNCHER_VERSION = 3
 
 function reportStaleLauncher(): void {
   // CLCO_APP_DIR is set by every launcher; without it clco was started
@@ -431,8 +576,8 @@ function reportStaleLauncher(): void {
   const running = Number(process.env.CLCO_LAUNCHER_VERSION ?? "0")
   if (running >= LAUNCHER_VERSION) return
   console.log(
-    `\nNote: the ~/.local/bin/clco launcher is out of date (v${running || "?"} < v${LAUNCHER_VERSION}).` +
-      " Refresh it with `clco update`, or by re-running install.sh.",
+    `\nNote: the clco launcher is out of date (v${running || "?"} < v${LAUNCHER_VERSION}).` +
+      " Refresh it with `clco update`, or by re-running install.sh with the same custom paths.",
   )
 }
 
