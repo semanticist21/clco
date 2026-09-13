@@ -103,6 +103,13 @@ const pad = (rows: ReadonlyArray<[string, string]>, width: number) =>
 
 export const COMMAND_LIST = `Commands:\n${pad(COMMANDS, 20)}`
 
+function searchAgentModel(models: ReadonlyArray<{ id: string }>): string | undefined {
+  // Copilot's own search-agent models: a plans web queries, b/c plan code
+  // search. Prefer the web one; anything is better than no planner.
+  return models.find((model) => model.id === "copilot-search-a")?.id ??
+    models.find((model) => model.id.startsWith("copilot-search"))?.id
+}
+
 const HELP = `clco v${VERSION} — run Claude Code on your GitHub Copilot subscription
 
 Usage:
@@ -837,10 +844,12 @@ async function main(): Promise<void> {
   const browserEnabled =
     setup?.browser === true && args.overrides.browser !== false
   const browserExtension = browserEnabled ? await extensionInstalled() : false
+  const webEnabled = setup?.web === true && args.overrides.web !== false
+  const searchAgent = searchAgentModel(list)
   // Computed from the arguments actually produced: clco stands aside when the
   // user passes their own --mcp-config, and claiming success there would be
   // the same trap as registering a server with no extension.
-  const injected = setupClaudeArgs(setup, args.overrides, args.claudeArgs, browserExtension)
+  const injected = setupClaudeArgs(setup, args.overrides, args.claudeArgs, browserExtension, searchAgent)
   const registered = injected.includes("--mcp-config")
   const browserLine = startupLine(
     browserEnabled,
@@ -856,6 +865,15 @@ async function main(): Promise<void> {
     browserEnabled && browserExtension ? registered : undefined,
   )
   if (browserLine) console.error(browserLine)
+  console.error(
+    webEnabled && !searchAgent
+      ? "+ web: unavailable (Copilot exposed no search-agent model)"
+      : webEnabled && injected.includes("--mcp-config")
+      ? `+ web: search via ${searchAgent} planner + live local execution`
+      : webEnabled
+        ? "+ web: enabled in setup, but not registered because --mcp-config was supplied"
+        : "+ web: disabled (run `clco setup` to enable)",
+  )
 
   if (args.command === "serve") {
     console.error("Adapter running... (Ctrl+C to stop)")

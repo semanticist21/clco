@@ -64,9 +64,11 @@ export async function runSetup(): Promise<SetupPrefs> {
     current.bypass,
   )
 
-  // No web question: Copilot's endpoint rejects native web search on this
-  // seat, Claude's built-in Fetch already works through the adapter, and a
-  // search tool that always fails is worse than none.
+  setup.web = await ask(
+    "Search the web via Copilot's search planner (queries by copilot-search-a, live execution locally)?",
+    current.web ?? (prefs.setup === undefined),
+  )
+
   // Claude's own Chrome integration cannot work here, so there is nothing to
   // ask about it - only an alternative to offer.
   setup.browser = await ask(
@@ -140,6 +142,8 @@ export function setupClaudeArgs(
   claudeArgs: string[],
   /** Whether the Playwright MCP Bridge extension is installed. */
   browserExtension = false,
+  /** The Copilot search-agent model the web tool plans with. */
+  searchAgent?: string,
 ): string[] {
   if (!setup) return []
   // Match the `--flag=value` form too: an exact comparison let a user's own
@@ -159,8 +163,9 @@ export function setupClaudeArgs(
   // Registered per session rather than written into the user's MCP config, so
   // clco never edits configuration that outlives it.
   const browserRequested = setup.browser && overrides.browser !== false && browserExtension
-  if (browserRequested && !has("--mcp-config")) {
-    const config = combinedMcpConfig(browserExtension)
+  const webRequested = setup.web === true && overrides.web !== false
+  if ((browserRequested || webRequested) && !has("--mcp-config")) {
+    const config = combinedMcpConfig(browserExtension, webRequested, searchAgent)
     if (config) out.push("--mcp-config", config)
   }
   return out

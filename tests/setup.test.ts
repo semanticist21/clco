@@ -43,9 +43,12 @@ const saved = (over: Partial<Record<string, boolean>> = {}) => ({
   ...over,
 })
 
-test("web setup registers no MCP server - built-in Fetch suffices and search is dropped", () => {
-  expect(combinedMcpConfig(false)).toBeNull()
-  expect(setupClaudeArgs(saved({ web: true }), {}, [], false)).toEqual([
+test("web setup registers only the web tool server, with the planner model", () => {
+  const config = JSON.parse(combinedMcpConfig(false, true, "copilot-search-a")!)
+  expect(config.mcpServers.clco_web.args[0]).toContain("webmcp.ts")
+  expect(config.mcpServers.clco_web.env).toEqual({ CLCO_SEARCH_AGENT: "copilot-search-a" })
+  expect(setupClaudeArgs(saved({ web: true }), {}, [], false, "copilot-search-a")).toContain("--mcp-config")
+  expect(setupClaudeArgs(saved({ web: true }), { web: false }, [], false, "copilot-search-a")).toEqual([
     "--dangerously-skip-permissions",
   ])
 })
