@@ -316,3 +316,99 @@ test("parallel Responses tool round-trips preserve ids, arguments and images", (
     { type: "input_text", text: "compare" },
   ] })
 })
+
+test("mismatched item_id keys do not drop arguments or duplicate text", () => {
+  const adapter = new ResponsesEventAdapter()
+  adapter.pushEvent({
+    type: "response.output_item.added",
+    item: { type: "function_call", call_id: "call_1", id: "fc_A", name: "Bash" },
+  })
+  adapter.pushEvent({
+    type: "response.output_item.added",
+    item: { type: "message", id: "msg_A" },
+  })
+  const args = adapter.pushEvent({
+    type: "response.function_call_arguments.delta",
+    item_id: "fc_B",
+    delta: '{"command":"ls"}',
+  })
+  expect(args!.choices?.[0]?.delta?.tool_calls?.[0]?.function?.arguments).toBe(
+    '{"command":"ls"}',
+  )
+  const text1 = adapter.pushEvent({
+    type: "response.output_text.delta",
+    item_id: "msg_B",
+    delta: "hi",
+  })
+  expect(text1!.choices?.[0]?.delta?.content).toBe("hi")
+  const textDone = adapter.pushEvent({
+    type: "response.output_text.done",
+    item_id: "msg_B",
+    text: "hi there",
+  })
+  expect(textDone).toBeNull()
+})
+
+test("duplication shape: deltas under new id, done under added id stays suppressed", () => {
+  const adapter = new ResponsesEventAdapter()
+  adapter.pushEvent({
+    type: "response.output_item.added",
+    item: { type: "message", id: "msg_A" },
+  })
+  adapter.pushEvent({
+    type: "response.output_text.delta",
+    item_id: "msg_B",
+    delta: "hi",
+  })
+  const done = adapter.pushEvent({
+    type: "response.output_text.done",
+    item_id: "msg_A",
+    text: "hi there",
+  })
+  expect(done).toBeNull()
+  expect(adapter.lossSummary()).toContain("fallback")
+})
+
+test("parallel tool calls with mismatched delta ids route to the latest call once", () => {
+  const adapter = new ResponsesEventAdapter()
+  adapter.pushEvent({
+    type: "response.output_item.added",
+    item: { type: "function_call", call_id: "c1", id: "fc_A", name: "Bash" },
+  })
+  adapter.pushEvent({
+    type: "response.output_item.added",
+    item: { type: "function_call", call_id: "c2", id: "fc_B", name: "Read" },
+  })
+  const a = adapter.pushEvent({
+    type: "response.function_call_arguments.delta",
+    item_id: "fc_X",
+    delta: '{"command":"ls"}',
+  })
+  expect(a!.choices?.[0]?.delta?.tool_calls?.[0]?.index).toBe(1)
+  const done = adapter.pushEvent({
+    type: "response.function_call_arguments.done",
+    item_id: "fc_X",
+    arguments: '{"command":"ls"}',
+  })
+  expect(done).toBeNull()
+})
+
+test("well-formed multi-text-item streams keep items separate", () => {
+  const adapter = new ResponsesEventAdapter()
+  adapter.pushEvent({
+    type: "response.output_item.added",
+    item: { type: "message", id: "m1" },
+  })
+  adapter.pushEvent({ type: "response.output_text.delta", item_id: "m1", delta: "A1" })
+  adapter.pushEvent({
+    type: "response.output_item.added",
+    item: { type: "message", id: "m2" },
+  })
+  const b1 = adapter.pushEvent({
+    type: "response.output_text.delta",
+    item_id: "m2",
+    delta: "B1",
+  })
+  expect(b1!.choices?.[0]?.delta?.content).toBe("B1")
+  expect(adapter.lossSummary()).toBeNull()
+})

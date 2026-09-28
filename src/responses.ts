@@ -196,9 +196,68 @@ function incompleteError(response: Record<string, unknown> | undefined): OpenAIR
 export class ResponsesEventAdapter {
   private toolIndexes = new Map<string, number>()
   private argsAccum = new Map<string, string>()
+  private argsRescued = new Set<string>()
   private textAccum = new Map<string, string>()
+  private textRescued = new Set<string>()
+  private lastToolKey: string | null = null
+  private lastTextKey: string | null = null
   private nextIndex = 0
   private sawToolCall = false
+  private fallbacks = 0
+  private drops = 0
+  private firstLoss: string | null = null
+
+  // Some upstreams spell the item_id differently on output_item.added than on
+  // the delta/done events that follow (observed with gpt-6-astra). An unknown
+  // id falls back to the most recent item of that kind so the event is not
+  // silently dropped. Ceilings: interleaved parallel tool calls with distinct
+  // mismatched ids cannot be correlated and merge into the latest item, and a
+  // text item announced only by added (deltas under another id) is not
+  // rescued. Both are visible in lossSummary().
+  private toolKeyFor(
+    itemId: string,
+    event?: Record<string, unknown>,
+  ): string | null {
+    if (this.toolIndexes.has(itemId)) return itemId
+    if (this.lastToolKey !== null) {
+      this.fallbacks++
+      this.noteLoss(
+        `arg event item_id=${itemId} matched to most recent tool call ${this.lastToolKey}`,
+        event,
+      )
+    }
+    return this.lastToolKey
+  }
+
+  private textKeyFor(
+    itemId: string,
+    event?: Record<string, unknown>,
+  ): string {
+    if (this.textAccum.has(itemId) || this.lastTextKey === null)
+      return itemId
+    this.fallbacks++
+    this.noteLoss(
+      `text event item_id=${itemId} matched to most recent text item ${this.lastTextKey}`,
+      event,
+    )
+    return this.lastTextKey
+  }
+
+  private noteLoss(detail: string, event?: Record<string, unknown>): void {
+    if (this.firstLoss !== null) return
+    const raw = event ? ` event=${JSON.stringify(event).slice(0, 300)}` : ""
+    this.firstLoss = detail + raw
+  }
+
+  /** One line per stream, or null when every event matched an added item. */
+  lossSummary(): string | null {
+    if (this.fallbacks === 0 && this.drops === 0) return null
+    const parts: string[] = []
+    if (this.fallbacks > 0)
+      parts.push(`${this.fallbacks} event(s) matched by fallback (guessed item)`)
+    if (this.drops > 0) parts.push(`${this.drops} event(s) dropped (lost)`)
+    return `${parts.join("; ")}; first: ${this.firstLoss}`
+  }
 
   /** Convert one Responses stream event into OpenAI-chunk shape (or null). */
   pushEvent(event: Record<string, unknown>): OpenAIResponse | null {
@@ -208,8 +267,9 @@ export class ResponsesEventAdapter {
     if (type === "response.output_text.delta") {
       const delta = event.delta as string | undefined
       if (!delta) return null
-      const key = String(event.item_id ?? "r")
+      const key = this.textKeyFor(String(event.item_id ?? "r"))
       this.textAccum.set(key, (this.textAccum.get(key) ?? "") + delta)
+      this.lastTextKey = key
       return {
         id: key,
         model: "",
@@ -220,9 +280,10 @@ export class ResponsesEventAdapter {
     if (type === "response.output_text.done") {
       // Authoritative fallback: if no delta arrived for this item, emit the
       // full text so a lost stream cannot silently become an empty message.
-      const key = String(event.item_id ?? "r")
+      const key = this.textKeyFor(String(event.item_id ?? "r"), event)
       const full = (event.text as string | undefined) ?? ""
-      if (full && !(this.textAccum.get(key) ?? "")) {
+      if (full && !(this.textRescued.has(key) || this.textAccum.get(key))) {
+        this.textRescued.add(key)
         return {
           id: key,
           model: "",
@@ -236,13 +297,20 @@ export class ResponsesEventAdapter {
       const item = event.item as
         | { type?: string; call_id?: string; id?: string; name?: string }
         | undefined
-      if (item?.type !== "function_call") return null
+      if (item?.type !== "function_call") {
+        // A non-function item (message, reasoning, ...) is a genuinely new
+        // text item: stop pointing lastTextKey at the previous one so its
+        // deltas are never folded in.
+        this.lastTextKey = null
+        return null
+      }
       this.sawToolCall = true
       const index = this.nextIndex++
       const key = String(item.call_id ?? item.id ?? index)
       this.toolIndexes.set(key, index)
       // Arguments deltas are keyed by item_id; remember that too.
       if (item.id) this.toolIndexes.set(String(item.id), index)
+      this.lastToolKey = String(item.id ?? key)
       return {
         id: String(item.call_id ?? item.id ?? "r"),
         model: "",
@@ -267,9 +335,16 @@ export class ResponsesEventAdapter {
     if (type === "response.function_call_arguments.delta") {
       const delta = event.delta as string | undefined
       if (!delta) return null
-      const key = String(event.item_id ?? "")
-      const index = this.toolIndexes.get(key)
-      if (index === undefined) return null
+      const key = this.toolKeyFor(String(event.item_id ?? ""), event)
+      if (key === null || !this.toolIndexes.has(key)) {
+        this.drops++
+        this.noteLoss(
+          `arg delta item_id=${event.item_id} had no tool call to attach to`,
+          event,
+        )
+        return null
+      }
+      const index = this.toolIndexes.get(key)!
       this.argsAccum.set(key, (this.argsAccum.get(key) ?? "") + delta)
       return {
         id: key,
@@ -287,11 +362,20 @@ export class ResponsesEventAdapter {
     }
 
     if (type === "response.function_call_arguments.done") {
-      const key = String(event.item_id ?? "")
-      const index = this.toolIndexes.get(key)
-      if (index === undefined) return null
+      const key = this.toolKeyFor(String(event.item_id ?? ""), event)
+      if (key === null || !this.toolIndexes.has(key)) {
+        this.drops++
+        this.noteLoss(
+          `arg done item_id=${event.item_id} had no tool call to attach to`,
+          event,
+        )
+        return null
+      }
+      const index = this.toolIndexes.get(key)!
       const full = (event.arguments as string | undefined) ?? ""
-      if (full && !(this.argsAccum.get(key) ?? "")) {
+      if (full && !(this.argsRescued.has(key) || this.argsAccum.get(key))) {
+        this.argsRescued.add(key)
+        this.argsAccum.set(key, full)
         return {
           id: key,
           model: "",

@@ -361,6 +361,10 @@ function sseResponse(
         if (!errored) {
           for (const ev of translator.finish()) send(ev)
         }
+        // Item-id mismatches and drops must never be silent again: this
+        // incident hid for 97 tool calls behind a debug-only log path.
+        const loss = eventAdapter?.lossSummary()
+        if (loss) console.error("[clco:responses]", loss)
       } catch (err) {
         send({
           event: "error",
