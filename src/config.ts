@@ -8,7 +8,6 @@ import {
   readFile,
   rename,
   rm,
-  unlink,
   writeFile,
 } from "node:fs/promises"
 import { homedir } from "node:os"
@@ -72,18 +71,7 @@ export async function loadAuth(): Promise<AuthStore | null> {
 export async function saveAuth(auth: AuthStore): Promise<void> {
   await mkdir(authDir(), { recursive: true })
   await chmod(authDir(), 0o700).catch(() => {})
-  const tmp = join(authDir(), `.auth.${process.pid}.tmp`)
-  const handle = await openExclusive(tmp)
-  try {
-    await handle.writeFile(JSON.stringify(auth, null, 2) + "\n")
-    await handle.close()
-    await rename(tmp, authPath())
-    await chmod(authPath(), 0o600).catch(() => {})
-  } catch (err) {
-    await handle.close().catch(() => {})
-    await unlink(tmp).catch(() => {})
-    throw err
-  }
+  await writeSecret(authPath(), JSON.stringify(auth, null, 2) + "\n")
 }
 
 // "wx": fail if the temp file already exists (never truncate through a
@@ -121,10 +109,17 @@ function prefsPath(): string {
 
 export async function loadPrefs(): Promise<Prefs> {
   await migrateFromClcopilot()
+  const raw = await readFile(prefsPath(), "utf8").catch((err) => {
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") return null
+    throw err
+  })
+  if (raw === null) return {}
   try {
-    return JSON.parse(await readFile(prefsPath(), "utf8")) as Prefs
-  } catch {
-    return {}
+    return JSON.parse(raw) as Prefs
+  } catch (err) {
+    // Treating it as empty let the next save overwrite the setup answers and
+    // the stored extension token with defaults.
+    throw new Error(`${prefsPath()} is not valid JSON (${(err as Error).message}) - fix or delete it`)
   }
 }
 
@@ -137,15 +132,19 @@ export async function loadPrefs(): Promise<Prefs> {
  */
 async function writeSecret(path: string, data: string): Promise<void> {
   const tmp = `${path}.tmp.${process.pid}`
+  // A crash can leave one behind, and "wx" would then refuse it forever.
   await rm(tmp, { force: true }).catch(() => {})
   const handle = await openExclusive(tmp)
   try {
     await handle.writeFile(data)
-  } finally {
     await handle.close()
+    await chmod(tmp, 0o600).catch(() => {})
+    await rename(tmp, path)
+  } catch (err) {
+    await handle.close().catch(() => {})
+    await rm(tmp, { force: true }).catch(() => {})
+    throw err
   }
-  await chmod(tmp, 0o600).catch(() => {})
-  await rename(tmp, path)
 }
 
 export async function savePrefs(prefs: Prefs): Promise<void> {

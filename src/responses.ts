@@ -166,7 +166,9 @@ export function toResponsesRequest(
       description: t.description,
       parameters: t.input_schema,
     })),
-    tool_choice: pinnedMissing
+    tool_choice: servable.length === 0
+      ? undefined
+      : pinnedMissing
       ? ("auto" as const)
       : choice?.type === "auto"
         ? ("auto" as const)

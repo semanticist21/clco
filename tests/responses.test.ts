@@ -163,7 +163,7 @@ describe("ResponsesEventAdapter", () => {
     expect(toResponsesRequest(base, ["low", "medium", "high", "max"]).reasoning).toEqual({
       effort: "max",
     })
-    expect(toResponsesRequest(base, ["low", "medium", "high"]).reasoning).toBeUndefined()
+    expect(toResponsesRequest(base, ["low", "medium", "high"]).reasoning).toEqual({ effort: "high" })
     expect(toResponsesRequest(base).reasoning).toBeUndefined()
   })
 

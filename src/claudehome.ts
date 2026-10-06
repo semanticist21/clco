@@ -26,6 +26,7 @@ import {
   writeFile,
 } from "node:fs/promises"
 import { homedir } from "node:os"
+import { isDeepStrictEqual } from "node:util"
 import { join } from "node:path"
 
 /** Written by claude during a session — must stay private to clco. */
@@ -46,6 +47,7 @@ const PRIVATE_ENTRIES = new Set([
  * user's file every launch discarded whatever claude had persisted in the
  * private one.
  */
+
 /**
  * clco owns routing and auth: ANTHROPIC_BASE_URL and the bearer travel in
  * the --settings tier. A provider env block in the user's own settings.json
@@ -75,20 +77,43 @@ function denyServerWebSearch(parsed: Record<string, unknown>): void {
   parsed.permissions = permissions
 }
 
-async function writeSettings(real: string, home: string): Promise<void> {
-  const target = join(home, "settings.json")
-  const source = await readFile(join(real, "settings.json"), "utf8").catch(
-    () => null,
-  )
-  const existing = await readFile(target, "utf8").catch(() => null)
-  const raw = source ?? existing
-  if (raw === null) return
+// What clco last derived from the user's settings.json. A three-way merge
+// against it tells the keys claude persisted during a clco session (kept)
+// from the ones the user changed in their own file since (taken).
+const SETTINGS_BASE = ".clco-settings-base.json"
+
+function isPlainObject(v: unknown): v is Record<string, unknown> {
+  return typeof v === "object" && v !== null && !Array.isArray(v)
+}
+
+/** Objects merge key by key, lists element by element; on a scalar clash clco's side wins. */
+export function merge3(base: unknown, mine: unknown, theirs: unknown): unknown {
+  if (isPlainObject(mine) && isPlainObject(theirs)) {
+    const b = isPlainObject(base) ? base : {}
+    const out: Record<string, unknown> = {}
+    for (const key of new Set([...Object.keys(mine), ...Object.keys(theirs)])) {
+      const v = merge3(b[key], mine[key], theirs[key])
+      if (v !== undefined) out[key] = v
+    }
+    return out
+  }
+  if (isDeepStrictEqual(mine, base)) return theirs
+  if (isDeepStrictEqual(theirs, base)) return mine
+  if (Array.isArray(mine) && Array.isArray(theirs) && Array.isArray(base)) {
+    // Both edited a list (permissions.allow, hooks): keep each side's
+    // additions and removals rather than one side's whole list.
+    const has = (list: unknown[], x: unknown) => list.some((y) => isDeepStrictEqual(x, y))
+    return [
+      ...theirs.filter((x) => !has(base, x) || has(mine, x)),
+      ...mine.filter((x) => !has(base, x) && !has(theirs, x)),
+    ]
+  }
+  return mine
+}
+
+function parseSettings(raw: string): Record<string, unknown> {
   try {
-    const parsed = JSON.parse(raw) as Record<string, unknown>
-    delete parsed.model
-    stripRoutingEnv(parsed)
-    denyServerWebSearch(parsed)
-    await atomicWrite(target, JSON.stringify(parsed, null, 2) + "\n")
+    return JSON.parse(raw) as Record<string, unknown>
   } catch {
     // claude tolerates comments where JSON.parse does not. A line-based regex
     // was worse than useless here: deleting the last key's line left a
@@ -96,25 +121,57 @@ async function writeSettings(real: string, home: string): Promise<void> {
     // nested in other objects, and it missed the key when it shared a line.
     // Strip comments, parse, and re-emit — losing the comments is a smaller
     // loss than losing the settings.
+    return JSON.parse(stripJsonComments(raw)) as Record<string, unknown>
+  }
+}
+
+function sanitizeSettings(parsed: Record<string, unknown>): Record<string, unknown> {
+  delete parsed.model
+  stripRoutingEnv(parsed)
+  denyServerWebSearch(parsed)
+  return parsed
+}
+
+async function writeSettings(real: string, home: string): Promise<void> {
+  const target = join(home, "settings.json")
+  const basePath = join(home, SETTINGS_BASE)
+  const source = await readFile(join(real, "settings.json"), "utf8").catch(
+    () => null,
+  )
+  const existing = await readFile(target, "utf8").catch(() => null)
+  if (source === null && existing === null) return
+  let theirs: Record<string, unknown>
+  try {
+    theirs = sanitizeSettings(parseSettings(source ?? existing!))
+  } catch (err) {
+    // Neither form parses: keep the previous private file rather than
+    // replace it with something broken, and say so - a stale `model` here
+    // is exactly what this function exists to prevent.
+    const first = existing === null
+    console.error(
+      `[clco] could not parse ${join(real, "settings.json")} (${(err as Error).message}) - ` +
+        (first
+          ? "this session starts with NO settings: no env, no hooks, no permissions."
+          : "clco's copy was left as it was."),
+    )
+    return
+  }
+  let merged = theirs
+  if (source !== null && existing !== null) {
     try {
-      const parsed = JSON.parse(stripJsonComments(raw)) as Record<string, unknown>
-      delete parsed.model
-    stripRoutingEnv(parsed)
-    denyServerWebSearch(parsed)
-      await atomicWrite(target, JSON.stringify(parsed, null, 2) + "\n")
-    } catch (err) {
-      // Neither form parses: keep the previous private file rather than
-      // replace it with something broken, and say so - a stale `model` here
-      // is exactly what this function exists to prevent.
-      const first = existing === null
-      console.error(
-        `[clco] could not parse ${join(real, "settings.json")} (${(err as Error).message}) - ` +
-          (first
-            ? "this session starts with NO settings: no env, no hooks, no permissions."
-            : "clco's copy was left as it was."),
-      )
+      const mine = parseSettings(existing)
+      const baseRaw = await readFile(basePath, "utf8").catch(() => null)
+      // No snapshot (first launch on this version): earlier versions rebuilt
+      // the private copy from the user's file every launch, so let it win.
+      const base = baseRaw === null ? mine : JSON.parse(baseRaw)
+      merged = sanitizeSettings(merge3(base, mine, theirs) as Record<string, unknown>)
+    } catch {
+      // An unreadable private copy has nothing worth keeping.
     }
   }
+  await atomicWrite(target, JSON.stringify(merged, null, 2) + "\n")
+  // A briefly missing user file keeps the old snapshot for when it returns.
+  if (source !== null) await atomicWrite(basePath, JSON.stringify(theirs, null, 2) + "\n")
 }
 
 /** Comments only — string contents are left alone. */
@@ -181,6 +238,27 @@ async function atomicWrite(path: string, data: string): Promise<void> {
   }
 }
 
+const PROJECT_MCP_KEYS = [
+  "mcpServers",
+  "enabledMcpjsonServers",
+  "disabledMcpjsonServers",
+  "enableAllProjectMcpServers",
+]
+// The real file's per-project MCP keys as last synced. Plain claude writes
+// empty defaults for every project, so "absent/empty there" cannot mean
+// "removed": only a change since this snapshot propagates.
+const CLAUDE_JSON_BASE = ".clco-claude-json-base.json"
+
+function projectMcp(json: Record<string, unknown>): Record<string, Record<string, unknown>> {
+  const out: Record<string, Record<string, unknown>> = {}
+  for (const [path, entry] of Object.entries((json.projects ?? {}) as Record<string, Record<string, unknown>>)) {
+    const keys: Record<string, unknown> = {}
+    for (const key of PROJECT_MCP_KEYS) if (entry?.[key] !== undefined) keys[key] = entry[key]
+    out[path] = keys
+  }
+  return out
+}
+
 /**
  * `.claude.json` carries trust decisions, MCP server definitions (with their
  * env secrets) and project history. Seeded once so the first session inherits
@@ -191,30 +269,46 @@ async function atomicWrite(path: string, data: string): Promise<void> {
  */
 async function syncClaudeState(userHome: string, home: string): Promise<void> {
   const target = join(home, ".claude.json")
+  const basePath = join(home, CLAUDE_JSON_BASE)
   const source = await readFile(join(userHome, ".claude.json"), "utf8").catch(
     () => null,
   )
   if (source === null) return
   const existing = await readFile(target, "utf8").catch(() => null)
-  if (existing === null) {
-    await copyFile(join(userHome, ".claude.json"), target).catch(() => {})
-    return
-  }
   try {
     const real = JSON.parse(source) as Record<string, unknown>
-    const mine = JSON.parse(existing) as Record<string, unknown>
-    mine.mcpServers = real.mcpServers
-    const realProjects = (real.projects ?? {}) as Record<string, { hasTrustDialogAccepted?: boolean }>
-    const myProjects = (mine.projects ?? {}) as Record<string, { hasTrustDialogAccepted?: boolean }>
-    for (const [path, entry] of Object.entries(myProjects)) {
-      // Absent means "no opinion", not "withdrawn". clco sessions run against
-      // the private config dir, so a project only ever used through clco is
-      // never recorded in the real file at all — forcing false there re-asked
-      // the trust question on every single launch.
-      const trusted = realProjects[path]?.hasTrustDialogAccepted
-      if (trusted !== undefined) entry.hasTrustDialogAccepted = trusted
+    if (existing === null) {
+      await copyFile(join(userHome, ".claude.json"), target)
+    } else {
+      const mine = JSON.parse(existing) as Record<string, unknown>
+      mine.mcpServers = real.mcpServers
+      const realProjects = (real.projects ?? {}) as Record<string, Record<string, unknown>>
+      const myProjects = (mine.projects ?? {}) as Record<string, Record<string, unknown>>
+      const baseRaw = await readFile(basePath, "utf8").catch(() => null)
+      // No snapshot (first launch on this version): earlier versions never
+      // synced these keys, so keep what clco has until the real file changes.
+      const base = baseRaw === null ? projectMcp(real) : JSON.parse(baseRaw)
+      if (Object.keys(realProjects).length > 0) mine.projects = myProjects
+      for (const [path, theirs] of Object.entries(realProjects)) {
+        const entry = (myProjects[path] ??= {})
+        // Local-scope MCP servers (the `claude mcp add` default) and the
+        // .mcp.json approvals live per project; a removal must reach clco.
+        for (const key of PROJECT_MCP_KEYS) {
+          const v = merge3(base[path]?.[key], entry[key], theirs[key])
+          if (v === undefined) delete entry[key]
+          else entry[key] = v
+        }
+        // Absent means "no opinion", not "withdrawn". clco sessions run against
+        // the private config dir, so a project only ever used through clco is
+        // never recorded in the real file at all — forcing false there re-asked
+        // the trust question on every single launch.
+        if (theirs.hasTrustDialogAccepted !== undefined) {
+          entry.hasTrustDialogAccepted = theirs.hasTrustDialogAccepted
+        }
+      }
+      await atomicWrite(target, JSON.stringify(mine, null, 2) + "\n")
     }
-    await atomicWrite(target, JSON.stringify(mine, null, 2) + "\n")
+    await atomicWrite(basePath, JSON.stringify(projectMcp(real)) + "\n")
   } catch {
     // Unparseable on either side: leave what is there rather than lose it.
   }
@@ -274,8 +368,20 @@ export async function prepareClaudeHome(
         // Trusting an existing link without checking left ones pointing at a
         // previous $HOME pointing there forever.
         if ((await readlink(link).catch(() => null)) === target) continue
+        await rm(link, { force: true })
+        await symlink(target, link)
+        continue
       }
-      if (existing) await rm(link, { recursive: true, force: true })
+      if (existing) {
+        // A real entry means claude created it here before ~/.claude had one
+        // (clco used before plain claude). Folding it in automatically races
+        // running sessions and concurrent launches, so leave it and say so.
+        console.error(
+          `[clco] ${link} is clco's own copy, so ~/.claude/${name} is not shared yet.` +
+            ` Merge it into ${target} and delete it to share.`,
+        )
+        continue
+      }
       await symlink(target, link)
     } catch {
       // One unlinkable entry should not sink the session.

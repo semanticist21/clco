@@ -102,6 +102,18 @@ beforeAll(async () => {
             { status: 400 },
           )
         }
+        if (nativeCalls[nativeCalls.length - 1]!.body.includes("COPILOT_OVERFLOW")) {
+          return Response.json(
+            { error: { message: "prompt token count of 210000 exceeds the limit of 200000", code: "model_max_prompt_tokens_exceeded" } },
+            { status: 400 },
+          )
+        }
+        if (nativeCalls[nativeCalls.length - 1]!.body.includes("OVERFLOW")) {
+          return Response.json(
+            { type: "error", error: { type: "invalid_request_error", message: "prompt is too long: 210000 tokens > 200000 maximum" } },
+            { status: 400 },
+          )
+        }
         if (model === "mock-native-temporary" && nativeCalls.length === 1) {
           return Response.json({ error: { message: "unsupported parameter: temperature" } }, { status: 400 })
         }
@@ -671,6 +683,32 @@ describe("adapter server", () => {
     expect(second.status).toBe(200)
     expect((await second.json()).content[0].text).toBe("native non-stream")
     expect(nativeCalls).toHaveLength(2)
+  })
+
+  test("a native context overflow surfaces as-is instead of falling back", async () => {
+    nativeCalls.length = 0
+    const res = await post("/v1/messages", {
+      model: "mock-native-temporary",
+      max_tokens: 32,
+      messages: [{ role: "user", content: "OVERFLOW" }],
+    })
+    expect(res.status).toBe(400)
+    expect(nativeCalls).toHaveLength(1)
+    const body = (await res.json()) as { error: { message: string } }
+    expect(body.error.message).toContain("prompt is too long")
+  })
+
+  test("Copilot's own overflow wording also surfaces as Anthropic's phrase", async () => {
+    nativeCalls.length = 0
+    const res = await post("/v1/messages", {
+      model: "mock-native-temporary",
+      max_tokens: 32,
+      messages: [{ role: "user", content: "COPILOT_OVERFLOW" }],
+    })
+    expect(res.status).toBe(400)
+    expect(nativeCalls).toHaveLength(1)
+    const body = (await res.json()) as { error: { message: string } }
+    expect(body.error.message).toStartWith("prompt is too long: prompt token count")
   })
 
   test("upstream connection failures map to Anthropic error bodies", async () => {

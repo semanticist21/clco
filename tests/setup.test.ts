@@ -21,6 +21,8 @@ import {
   setupEnv,
   shouldSelectModel,
 } from "../src/setup"
+
+const isMcpConfig = (a: string) => a.startsWith("--mcp-config")
 import { tlsHint } from "../src/tls"
 
 // Most cases exercise defaults; exported package overrides belong only in
@@ -47,7 +49,7 @@ test("web setup registers only the web tool server, with the planner model", () 
   const config = JSON.parse(combinedMcpConfig(false, true, "copilot-search-a")!)
   expect(config.mcpServers.clco_web.args[0]).toContain("webmcp.ts")
   expect(config.mcpServers.clco_web.env).toEqual({ CLCO_SEARCH_AGENT: "copilot-search-a" })
-  expect(setupClaudeArgs(saved({ web: true }), {}, [], false, "copilot-search-a")).toContain("--mcp-config")
+  expect(setupClaudeArgs(saved({ web: true }), {}, [], false, "copilot-search-a").some(isMcpConfig)).toBe(true)
   expect(setupClaudeArgs(saved({ web: true }), { web: false }, [], false, "copilot-search-a")).toEqual([
     "--dangerously-skip-permissions",
   ])
@@ -111,9 +113,9 @@ describe("defaults", () => {
 describe("browser control", () => {
   test("registers the server for the session, without touching MCP config", () => {
     const args = setupClaudeArgs(saved({ browser: true }), {}, [], true)
-    const i = args.indexOf("--mcp-config")
-    expect(i).toBeGreaterThan(-1)
-    const server = JSON.parse(args[i + 1]!).mcpServers.playwright
+    const flag = args.find((a) => a.startsWith("--mcp-config="))
+    expect(flag).toBeDefined()
+    const server = JSON.parse(flag!.slice("--mcp-config=".length)).mcpServers.playwright
     // The literal, not the constant - comparing MCP_PACKAGE to itself passes
     // for a typo or an unintended pin just as happily.
     expect(server.args).toContain("@playwright/mcp@latest")
@@ -146,24 +148,24 @@ describe("browser control", () => {
   // The extension is the half clco cannot install; registering the server
   // alone would surface tools that fail on every call.
   test("registers nothing when the extension is missing", () => {
-    expect(setupClaudeArgs(saved({ browser: true }), {}, [], false)).not.toContain(
-      "--mcp-config",
-    )
+    expect(setupClaudeArgs(saved({ browser: true }), {}, [], false).some(isMcpConfig)).toBe(false)
     expect(browserMcpConfig(false)).toBeNull()
   })
 
   test("--no-browser skips it for one run", () => {
     expect(
-      setupClaudeArgs(saved({ browser: true }), { browser: false }, [], true),
-    ).not.toContain("--mcp-config")
+      setupClaudeArgs(saved({ browser: true }), { browser: false }, [], true)
+        .some(isMcpConfig),
+    ).toBe(false)
   })
 
   // A user-supplied --mcp-config owns the session's MCP set; adding a second
   // one silently would change what they asked for.
   test("defers to an --mcp-config the user passed", () => {
     expect(
-      setupClaudeArgs(saved({ browser: true }), {}, ["--mcp-config", "x.json"], true),
-    ).not.toContain("--mcp-config")
+      setupClaudeArgs(saved({ browser: true }), {}, ["--mcp-config", "x.json"], true)
+        .some(isMcpConfig),
+    ).toBe(false)
   })
 
   test("reports the extension without probing the network", async () => {

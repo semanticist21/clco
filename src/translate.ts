@@ -39,15 +39,34 @@ function marked(blocks: unknown): boolean {
 const COPILOT_CACHE = { type: "ephemeral" } as const
 
 // Copilot declares the reasoning_effort values each model accepts in its
-// /models capabilities. Send the effort only when the model claims it —
-// anything else is dropped rather than risking a 400.
+// /models capabilities, and they rarely match Claude Code's tiers one to one
+// (kimi offers low/high/max, gpt-5-mini tops out at high). A tier the model
+// lacks maps to its nearest declared one, ties going up, so /effort still
+// moves the dial instead of silently falling back to the upstream default.
+const EFFORT_ORDER = ["none", "minimal", "low", "medium", "high", "xhigh", "max"]
+
 export function effortFor(
   payload: AnthropicRequest,
   allowed: string[] | null | undefined,
 ): string | undefined {
   const effort = payload.output_config?.effort
-  if (!effort || !allowed || !allowed.includes(effort)) return undefined
-  return effort
+  if (!effort || !allowed || allowed.length === 0) return undefined
+  if (allowed.includes(effort)) return effort
+  const want = EFFORT_ORDER.indexOf(effort)
+  if (want < 0) return undefined
+  let best: string | undefined
+  let bestDistance = Infinity
+  for (const value of allowed) {
+    // "none" turns reasoning off; never pick it for a tier that asked for some.
+    const rank = value === "none" ? -1 : EFFORT_ORDER.indexOf(value)
+    if (rank < 0) continue
+    const distance = Math.abs(rank - want)
+    if (distance < bestDistance || (distance === bestDistance && rank > want)) {
+      best = value
+      bestDistance = distance
+    }
+  }
+  return best
 }
 
 // ---------------------------------------------------------------------------
@@ -236,8 +255,11 @@ function translateSystem(
 function translateTools(
   tools: AnthropicRequest["tools"],
 ): OpenAIRequest["tools"] {
-  if (!tools || tools.length === 0) return undefined
-  return tools.map((tool) => ({
+  // Claude's server-side tools (web_search, ...) carry no input_schema and
+  // cannot run as client functions; drop them like the Responses path does.
+  const servable = tools?.filter((tool) => tool.input_schema)
+  if (!servable || servable.length === 0) return undefined
+  return servable.map((tool) => ({
     type: "function" as const,
     function: {
       name: tool.name,
@@ -276,6 +298,7 @@ export function translateRequest(
   allowedEfforts?: string[] | null,
 ): OpenAIRequest {
   const effort = effortFor(payload, allowedEfforts)
+  const tools = translateTools(payload.tools)
   return {
     model: normalizeModel(payload.model),
     ...(effort && { reasoning_effort: effort }),
@@ -301,15 +324,11 @@ export function translateRequest(
     temperature: payload.temperature,
     top_p: payload.top_p,
     user: payload.metadata?.user_id ?? null,
-    tools: translateTools(payload.tools),
-    tool_choice: translateToolChoice(
-      payload.tool_choice,
-      new Set(
-        (payload.tools ?? [])
-          .filter((tool) => tool.input_schema)
-          .map((tool) => tool.name),
-      ),
-    ),
+    tools,
+    // A tool_choice with no tools left is a 400 on OpenAI-style endpoints.
+    tool_choice: tools
+      ? translateToolChoice(payload.tool_choice, new Set(tools.map((t) => t.function.name)))
+      : undefined,
   }
 }
 

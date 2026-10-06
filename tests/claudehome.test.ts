@@ -243,3 +243,106 @@ describe("project trust", () => {
     await rm(home, { recursive: true, force: true })
   })
 })
+
+describe("upgrade-safe merges", () => {
+  // claude writes real dirs into the private home when ~/.claude lacks them;
+  // a later plain claude run creating ~/.claude/projects used to rm -rf them.
+  test("never deletes a clco-only entry once ~/.claude gains the same name", async () => {
+    const home = join(tmpdir(), `clco-keep-${Date.now()}`)
+    await mkdir(home, { recursive: true })
+    const dir = (await run(home))!
+    await mkdir(join(dir, "projects", "p"), { recursive: true })
+    await writeFile(join(dir, "projects", "p", "s.jsonl"), "clco\n")
+    await mkdir(join(home, ".claude", "projects"), { recursive: true })
+    await run(home)
+    expect(await readFile(join(dir, "projects", "p", "s.jsonl"), "utf8")).toBe("clco\n")
+    await rm(home, { recursive: true, force: true })
+  })
+
+  // Rebuilding from the user's file every launch discarded /plugin and
+  // /permissions writes made inside clco.
+  test("keeps settings claude persisted while following the user's edits", async () => {
+    const home = join(tmpdir(), `clco-merge-${Date.now()}`)
+    const real = join(home, ".claude")
+    await mkdir(real, { recursive: true })
+    await writeFile(join(real, "settings.json"), JSON.stringify({ env: { A: "1" }, theme: "dark" }))
+    const dir = (await run(home))!
+    const priv = JSON.parse(await readFile(join(dir, "settings.json"), "utf8"))
+    priv.enabledPlugins = { "x@y": true }
+    priv.model = "kimi-k3"
+    await writeFile(join(dir, "settings.json"), JSON.stringify(priv))
+    await writeFile(join(real, "settings.json"), JSON.stringify({ env: { A: "2" } }))
+    await run(home)
+    const after = JSON.parse(await readFile(join(dir, "settings.json"), "utf8"))
+    expect(after.enabledPlugins).toEqual({ "x@y": true })
+    expect(after.env).toEqual({ A: "2" })
+    expect(after.theme).toBeUndefined()
+    expect(after.model).toBeUndefined()
+    expect(after.permissions.deny).toContain("WebSearch")
+    await rm(home, { recursive: true, force: true })
+  })
+
+  test("an upgrade without a snapshot lets the user's settings win", async () => {
+    const home = join(tmpdir(), `clco-upgrade-${Date.now()}`)
+    const real = join(home, ".claude")
+    await mkdir(real, { recursive: true })
+    await writeFile(join(real, "settings.json"), JSON.stringify({ theme: "light", hooks: { x: 1 } }))
+    const dir = join(home, ".config", "clco", "claude-home")
+    await mkdir(dir, { recursive: true })
+    await writeFile(join(dir, "settings.json"), JSON.stringify({ theme: "dark" }))
+    await run(home)
+    await run(home)
+    const after = JSON.parse(await readFile(join(dir, "settings.json"), "utf8"))
+    expect(after.theme).toBe("light")
+    expect(after.hooks).toEqual({ x: 1 })
+    await rm(home, { recursive: true, force: true })
+  })
+
+  // Plain claude writes empty MCP defaults for every project it opens; those
+  // must not wipe a server added inside a clco session.
+  test("clco-added local MCP servers survive the real file's empty defaults", async () => {
+    const home = join(tmpdir(), `clco-mcpkeep-${Date.now()}`)
+    await mkdir(join(home, ".claude"), { recursive: true })
+    const defaults = { mcpServers: {}, enabledMcpjsonServers: [] }
+    await writeFile(join(home, ".claude.json"), JSON.stringify({ projects: { "/p": defaults } }))
+    const dir = (await run(home))!
+    const priv = JSON.parse(await readFile(join(dir, ".claude.json"), "utf8"))
+    priv.projects["/p"] = { mcpServers: { mine: { command: "m" } }, enabledMcpjsonServers: ["y"] }
+    await writeFile(join(dir, ".claude.json"), JSON.stringify(priv))
+    await run(home)
+    const after = JSON.parse(await readFile(join(dir, ".claude.json"), "utf8"))
+    expect(after.projects["/p"].mcpServers).toEqual({ mine: { command: "m" } })
+    expect(after.projects["/p"].enabledMcpjsonServers).toEqual(["y"])
+    await rm(home, { recursive: true, force: true })
+  })
+
+  test("list settings merge element by element", async () => {
+    const home = join(tmpdir(), `clco-list-${Date.now()}`)
+    const real = join(home, ".claude")
+    await mkdir(real, { recursive: true })
+    await writeFile(join(real, "settings.json"), JSON.stringify({ permissions: { allow: ["ls"] } }))
+    const dir = (await run(home))!
+    const priv = JSON.parse(await readFile(join(dir, "settings.json"), "utf8"))
+    priv.permissions.allow.push("git status")
+    await writeFile(join(dir, "settings.json"), JSON.stringify(priv))
+    await writeFile(join(real, "settings.json"), JSON.stringify({ permissions: { allow: ["ls", "npm test"] } }))
+    await run(home)
+    await run(home)
+    const after = JSON.parse(await readFile(join(dir, "settings.json"), "utf8"))
+    expect(after.permissions.allow.sort()).toEqual(["git status", "ls", "npm test"])
+    await rm(home, { recursive: true, force: true })
+  })
+
+  test("a local-scope MCP server removed in ~/.claude.json leaves clco too", async () => {
+    const home = join(tmpdir(), `clco-localmcp-${Date.now()}`)
+    await mkdir(join(home, ".claude"), { recursive: true })
+    const evil = { command: "x", env: { SECRET: "s" } }
+    await writeFile(join(home, ".claude.json"), JSON.stringify({ projects: { "/p": { mcpServers: { evil } } } }))
+    const dir = (await run(home))!
+    await writeFile(join(home, ".claude.json"), JSON.stringify({ projects: { "/p": {} } }))
+    await run(home)
+    const after = JSON.parse(await readFile(join(dir, ".claude.json"), "utf8"))
+    expect(after.projects["/p"].mcpServers).toBeUndefined()
+    await rm(home, { recursive: true, force: true })
+  })
+})

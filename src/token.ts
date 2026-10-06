@@ -59,7 +59,15 @@ async function fetchCopilotToken(): Promise<string> {
     // Short metadata call — never let a hung connection stall startup.
     signal: AbortSignal.timeout(10_000),
   })
-  if (res.status === 401 || res.status === 403) {
+  if (res.status === 403) {
+    // A valid token refused Copilot (no seat, org policy, SSO): re-auth would
+    // only fetch another token that hits the same wall.
+    const detail = await res.text().catch(() => "")
+    throw new Error(
+      `Copilot access denied: HTTP 403 (check your Copilot seat or org policy)${detail ? ` - ${detail.slice(0, 300)}` : ""}`,
+    )
+  }
+  if (res.status === 401) {
     // The stored GitHub token is revoked/expired — drop it so the next
     // ensureGithubToken can pick up a fresh one after re-auth.
     githubToken = null

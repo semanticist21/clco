@@ -10,7 +10,7 @@ import {
 } from "../src/translate"
 
 describe("translateRequest", () => {
-  test("degrades a tool_choice pinned to a schema-less server tool", () => {
+  test("drops schema-less server tools and degrades a tool_choice pinned to one", () => {
     const out = translateRequest({
       model: "gpt-4.1",
       max_tokens: 100,
@@ -22,6 +22,19 @@ describe("translateRequest", () => {
       tool_choice: { type: "tool", name: "web_search" },
     } as unknown as Parameters<typeof translateRequest>[0])
     expect(out.tool_choice).toBe("auto")
+    expect(out.tools?.map((t) => t.function.name)).toEqual(["read_file"])
+  })
+
+  test("sends no tool_choice when every tool was dropped", () => {
+    const out = translateRequest({
+      model: "gpt-4.1",
+      max_tokens: 100,
+      messages: [{ role: "user", content: "hi" }],
+      tools: [{ name: "web_search", type: "web_search_20250305" }],
+      tool_choice: { type: "any" },
+    } as unknown as Parameters<typeof translateRequest>[0])
+    expect(out.tools).toBeUndefined()
+    expect(out.tool_choice).toBeUndefined()
   })
 
   test("merges system blocks into a single system message", () => {
@@ -213,7 +226,7 @@ describe("translateRequest", () => {
     expect(nonStream.stream_options).toBeUndefined()
   })
 
-  test("effort is sent only when the model declares that value", () => {
+  test("effort maps to the model's nearest declared value", () => {
     const base = {
       model: "m",
       max_tokens: 8,
@@ -224,7 +237,15 @@ describe("translateRequest", () => {
     expect(translateRequest(base, ["low", "medium", "high", "xhigh"]).reasoning_effort).toBe(
       "xhigh",
     )
-    expect(translateRequest(base, ["low", "medium", "high"]).reasoning_effort).toBeUndefined()
+    expect(translateRequest(base, ["low", "medium", "high"]).reasoning_effort).toBe("high")
+    const kimi = ["low", "high", "max"]
+    const at = (effort: string, allowed: string[]) =>
+      translateRequest({ ...base, output_config: { effort } }, allowed).reasoning_effort
+    expect(at("medium", kimi)).toBe("high")
+    expect(at("xhigh", kimi)).toBe("max")
+    expect(at("low", ["none", "medium"])).toBe("medium")
+    expect(at("bogus", kimi)).toBeUndefined()
+    expect(translateRequest(base, [])).not.toHaveProperty("reasoning_effort")
     expect(translateRequest(base, null).reasoning_effort).toBeUndefined()
     expect(translateRequest(base).reasoning_effort).toBeUndefined()
     expect(

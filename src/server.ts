@@ -146,6 +146,9 @@ function detectVision(payload: OpenAIRequest): boolean {
 }
 
 const routes = new DialectRouter()
+// Anthropic's wording, OpenAI's, and Copilot's own pre-check.
+const CONTEXT_OVERFLOW =
+  /prompt is too long|context[ _](?:length|window)|maximum context|prompt token count of \d+ exceeds the limit|max_prompt_tokens_exceeded/i
 
 type ChatResult =
   | { ok: true; res: Response; dialect: Dialect }
@@ -225,9 +228,13 @@ async function copilotChat(
     // evidence changes future routing. Quota, auth and rate-limit failures
     // are not shape problems, so they surface
     // as-is rather than burning a second upstream call.
+    // A context overflow is the request's own fault, not the route's: the
+    // translated retry would only swap Anthropic's "prompt is too long" (the
+    // text Claude Code's reactive compaction keys on) for another error.
     if (
       dialect === "native" &&
-      [400, 404, 415, 422].includes(res.status)
+      [400, 404, 415, 422].includes(res.status) &&
+      !CONTEXT_OVERFLOW.test(text)
     ) {
       debug("native /v1/messages rejected:", res.status, text.slice(0, 300))
       const remembered = routes.rejectNative(payload.model, res.status, text)
@@ -246,7 +253,16 @@ async function copilotChat(
       dialect = "responses"
       continue
     }
-    return { ok: false, status: res.status, message: friendlyUpstreamError(text) }
+    const message = friendlyUpstreamError(text)
+    return {
+      ok: false,
+      status: res.status,
+      // Claude Code starts reactive compaction on Anthropic's phrase; give
+      // every dialect's overflow that phrase.
+      message: CONTEXT_OVERFLOW.test(text) && !/prompt is too long/i.test(message)
+        ? `prompt is too long: ${message}`
+        : message,
+    }
   }
   return { ok: false, status: 502, message: "upstream retry exhausted" }
 }
@@ -414,7 +430,7 @@ async function handleMessages(
   }
   const stream = payload.stream === true
   logLine(
-    `[${timestamp()}] POST /v1/messages model=${payload.model} stream=${stream}`,
+    `[${timestamp()}] POST /v1/messages model=${payload.model} stream=${stream} effort=${payload.output_config?.effort ?? "-"}`,
   )
 
   const info = modelInfo(normalizeModel(payload.model))

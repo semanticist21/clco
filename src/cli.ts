@@ -851,7 +851,7 @@ async function main(): Promise<void> {
   // user passes their own --mcp-config, and claiming success there would be
   // the same trap as registering a server with no extension.
   const injected = setupClaudeArgs(setup, args.overrides, args.claudeArgs, browserExtension, searchAgent)
-  const registered = injected.includes("--mcp-config")
+  const registered = injected.some((a) => a.startsWith("--mcp-config="))
   const browserLine = startupLine(
     browserEnabled,
     browserExtension,
@@ -869,7 +869,7 @@ async function main(): Promise<void> {
   console.error(
     webEnabled && !searchAgent
       ? "+ web: unavailable (Copilot exposed no search-agent model)"
-      : webEnabled && injected.includes("--mcp-config")
+      : webEnabled && registered
       ? `+ web: search via ${searchAgent} planner + live local execution`
       : webEnabled
         ? "+ web: enabled in setup, but not registered because --mcp-config was supplied"

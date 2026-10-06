@@ -246,7 +246,9 @@ curl -fsSL https://raw.githubusercontent.com/semanticist21/clco/main/uninstall.s
      Responses API where a model requires it (the GPT-5.x family). SSE
      streaming, tool calling, images and parallel tool calls work on both.
 
-   A rejected native attempt falls back to the translated path. Only an
+   A rejected native attempt falls back to the translated path, except a
+   context overflow, which comes back as Anthropic's own error so Claude Code
+   can compact. Only an
    unsupported model/endpoint rejection (including HTTP 404) is remembered;
    other request errors leave native routing available on the next turn.
    Route changes are recorded in the adapter log (`CLCO_DEBUG=1` in run mode).
@@ -278,8 +280,9 @@ CLCO_UPSTREAM=http://127.0.0.1:9099 bun run scripts/mock-upstream.ts
   personal use.
 - Extended thinking works on the native route only; it stays disabled on
   translated routes. `stop_sequences` are not enforced on Responses-API models.
-- `/effort` is forwarded when the selected model declares that level, and
-  dropped otherwise — rows in `/model` say which do not support it.
+- `/effort` maps to the nearest level the selected model declares (ties go
+  up; kimi's low/high/max turns `medium` into `high`) and is dropped for models
+  with none — rows in `/model` say which.
 - Catalog-known Claude rows recalculate their context handling when `/model`
   switches. Non-catalog rows use a conservative session ceiling because
   Claude Code cannot inspect their upstream context limit; this can compact

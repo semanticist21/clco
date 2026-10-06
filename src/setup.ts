@@ -166,7 +166,9 @@ export function setupClaudeArgs(
   const webRequested = setup.web === true && overrides.web !== false
   if ((browserRequested || webRequested) && !has("--mcp-config")) {
     const config = combinedMcpConfig(browserExtension, webRequested, searchAgent)
-    if (config) out.push("--mcp-config", config)
+    // One argv element: claude's --mcp-config is variadic, so a separate value
+    // would also swallow a positional prompt that follows (`clco -- "ask"`).
+    if (config) out.push(`--mcp-config=${config}`)
   }
   return out
 }

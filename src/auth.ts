@@ -110,6 +110,7 @@ export async function runDeviceFlow(): Promise<{ token: string; login?: string }
       try {
         const user = await copilotFetch(`${GITHUB_API_BASE_URL}/user`, {
           headers: githubRequestHeaders(token),
+          signal: AbortSignal.timeout(15_000),
         })
         if (user.ok) login = ((await user.json()) as { login?: string }).login
       } catch {
