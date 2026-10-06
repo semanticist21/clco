@@ -1,9 +1,17 @@
 {
   "name": "@semanticist14/clco",
-  "version": "0.2.2",
+  "version": "0.2.3",
   "private": false,
   "type": "module",
   "description": "Run Claude Code on a GitHub Copilot subscription",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/semanticist21/clco.git"
+  },
+  "homepage": "https://github.com/semanticist21/clco#readme",
+  "bugs": {
+    "url": "https://github.com/semanticist21/clco/issues"
+  },
   "bin": {
     "clco": "bin/clco"
   },
