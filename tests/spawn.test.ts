@@ -6,10 +6,11 @@ import { join } from "node:path"
 import { catalogModelIds } from "../src/catalog"
 import {
   buildLaunchArgs,
+  buildLaunchEnv,
   buildModelOverridesFrom,
   buildModelPickerFrom,
+  buildModelSettingsFrom,
   buildSettingsEnv,
-  compactWindowFor,
   validateModelSelection,
 } from "../src/spawn"
 
@@ -162,36 +163,32 @@ describe("buildModelPickerFrom", () => {
     expect(buildModelPickerFrom(big)!.options).toHaveLength(200)
   })
 
-  test("uses Claude's dynamic window for catalog rows and a cap for custom rows", () => {
-    expect(
-      compactWindowFor([
-        model({ id: "claude-opus-5", maxPromptTokens: 200000 }),
-        model({ id: "claude-sonnet-5", maxPromptTokens: 400000 }),
-      ]),
-    ).toBeUndefined()
-    expect(
-      compactWindowFor([
-        model({ id: "claude-opus-5", maxPromptTokens: 200000 }),
-        model({ id: "gpt-6-astra", maxPromptTokens: 272000 }),
-      ]),
-    ).toBe(200000)
-    expect(compactWindowFor([])).toBe(128000)
-    expect(
-      compactWindowFor([
-        model({ id: "claude-opus-5", maxPromptTokens: 272000 }),
-        model({ id: "custom-without-window" }),
-      ]),
-    ).toBe(128000)
-    const prev = process.env.CLCO_MIN_WINDOW
-    try {
-      process.env.CLCO_MIN_WINDOW = "500000"
-      expect(
-        compactWindowFor([model({ id: "custom", maxPromptTokens: 272000 })]),
-      ).toBe(128000)
-    } finally {
-      if (prev === undefined) delete process.env.CLCO_MIN_WINDOW
-      else process.env.CLCO_MIN_WINDOW = prev
-    }
+  test("keeps each Copilot prompt limit instead of capping every model at the smallest", () => {
+    expect(buildModelSettingsFrom([
+      model({ id: "claude-haiku-4.5", maxPromptTokens: 100000, maxContextTokens: 200000 }),
+      model({ id: "claude-opus-5", maxPromptTokens: 200000, maxContextTokens: 328000 }),
+      model({ id: "gpt-6-astra", maxPromptTokens: 272000, maxContextTokens: 400000 }),
+    ])).toEqual({
+      "claude-haiku-4-5": { autoCompactWindow: 100000 },
+      "claude-opus-5": { autoCompactWindow: 200000 },
+      "gpt-6-astra": { autoCompactWindow: 272000 },
+    })
+  })
+
+  test("uses context limits only when prompt limits are absent, then a fallback", () => {
+    expect(buildModelSettingsFrom([
+      model({ id: "context-only", maxContextTokens: 328000 }),
+      model({ id: "unknown" }),
+      model({ id: "large", maxPromptTokens: 2000000 }),
+      model({ id: "small", maxPromptTokens: 64000 }),
+      model({ id: "embedding", type: "embeddings" }),
+    ])).toEqual({
+      "context-only": { autoCompactWindow: 328000 },
+      unknown: { autoCompactWindow: 128000 },
+      large: { autoCompactWindow: 1000000 },
+      small: { autoCompactWindow: 100000 },
+    })
+    expect(buildModelSettingsFrom([])).toEqual({})
   })
 })
 
@@ -221,7 +218,7 @@ describe("buildSettingsEnv", () => {
     // Pinning ANTHROPIC_MODEL makes every /model switch cosmetic — claude
     // keeps using the pinned id and says so. The choice travels as --model.
     expect(env.ANTHROPIC_MODEL).toBeUndefined()
-    expect(env.CLAUDE_CODE_AUTO_COMPACT_WINDOW).toBeUndefined()
+    expect(env.CLAUDE_CODE_AUTO_COMPACT_WINDOW).toBe("")
     expect(env.CLAUDE_CODE_DISABLE_THINKING).toBeUndefined()
   })
 
@@ -233,14 +230,26 @@ describe("buildSettingsEnv", () => {
       efforts: null,
       maxContextTokens: 328000,
     })
-    expect(env.CLAUDE_CODE_AUTO_COMPACT_WINDOW).toBe("328000")
+    expect(env.CLAUDE_CODE_AUTO_COMPACT_WINDOW).toBe("")
     expect(env.CLAUDE_CODE_DISABLE_THINKING).toBe("1")
   })
 
-  test("unknown models fall back to the conservative window", () => {
+  test("unknown models also leave the global override cleared", () => {
     const env = buildSettingsEnv("http://127.0.0.1:1", models, "mystery", null)
-    expect(env.CLAUDE_CODE_AUTO_COMPACT_WINDOW).toBe("128000")
+    expect(env.CLAUDE_CODE_AUTO_COMPACT_WINDOW).toBe("")
     expect(env.CLAUDE_CODE_DISABLE_THINKING).toBe("1")
+  })
+
+  test("an inherited global cap cannot override the per-model limits", () => {
+    const previous = process.env.CLAUDE_CODE_AUTO_COMPACT_WINDOW
+    try {
+      process.env.CLAUDE_CODE_AUTO_COMPACT_WINDOW = "100000"
+      const env = buildLaunchEnv({ baseUrl: "http://127.0.0.1:1", models, claudeArgs: [] })
+      expect(env.CLAUDE_CODE_AUTO_COMPACT_WINDOW).toBe("")
+    } finally {
+      if (previous === undefined) delete process.env.CLAUDE_CODE_AUTO_COMPACT_WINDOW
+      else process.env.CLAUDE_CODE_AUTO_COMPACT_WINDOW = previous
+    }
   })
 })
 
@@ -266,20 +275,6 @@ describe("duplicate display names", () => {
     ])
     expect(picker.options[0]!.description).toStartWith("gpt-5.6-luna ·")
     expect(picker.options[1]!.description).toStartWith("gpt-5.6-luna-free-auto ·")
-  })
-
-  test("the window warning marks only models smaller than the session budget", () => {
-    const picker = buildModelPickerFrom(
-      [m("small", "Small"), m("big", "Big")].map((x, i) => ({
-        ...x,
-        maxPromptTokens: i === 0 ? 100000 : 917504,
-      })),
-      { sessionWindow: 200000 },
-    )!
-    const by = (id: string) =>
-      picker.options.find((o) => o.description!.startsWith(id))!
-    expect(by("small").description).toContain("! caps at 100k")
-    expect(by("big").description).not.toContain("⚠")
   })
 })
 

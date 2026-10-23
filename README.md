@@ -256,10 +256,10 @@ curl -fsSL https://raw.githubusercontent.com/semanticist21/clco/main/uninstall.s
 
    Input token counts are approximate. Near the discovered limit, the adapter
    logs a warning and forwards the request; the upstream decides whether it
-   fits. Catalog-known Claude rows use Claude Code's own per-model context
-   handling after `/model` switches. If the lineup contains a non-catalog row,
-   clco applies a conservative session ceiling based on the exact selectable
-   rows.
+   fits. clco passes each model's discovered `max_prompt_tokens` to Claude
+   Code's per-model auto-compact settings, so `/model` switches use that
+   model's own limit. When absent, `max_context_window_tokens` is used,
+   with a conservative 128k fallback when neither is available.
 
 ## Development
 
@@ -283,8 +283,7 @@ CLCO_UPSTREAM=http://127.0.0.1:9099 bun run scripts/mock-upstream.ts
 - `/effort` maps to the nearest level the selected model declares (ties go
   up; kimi's low/high/max turns `medium` into `high`) and is dropped for models
   with none — rows in `/model` say which.
-- Catalog-known Claude rows recalculate their context handling when `/model`
-  switches. Non-catalog rows use a conservative session ceiling because
-  Claude Code cannot inspect their upstream context limit; this can compact
-  earlier than a larger model requires.
+- Auto-compact settings support 100k–1M tokens and remain capped by Claude
+  Code's client-side model window. Custom models with a known input limit
+  below 100k are not offered.
 - License: [MIT](LICENSE)

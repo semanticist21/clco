@@ -11,7 +11,7 @@ import {
   type ServerHandle,
 } from "../src/server"
 import { discoverModels, upstreamModels } from "../src/token"
-import { buildModelPickerFrom } from "../src/spawn"
+import { buildLaunchArgs, buildModelPickerFrom } from "../src/spawn"
 
 let upstream: ReturnType<typeof Bun.serve>
 let adapter: ServerHandle
@@ -152,7 +152,10 @@ beforeAll(async () => {
           data: [
             // Production shape: GitHub returns model_picker_enabled:false for
             // every model, which is why honouring it emptied /model entirely.
-            { id: "mock-sonnet", name: "Mock Sonnet", model_picker_enabled: false },
+            {
+              id: "mock-sonnet", name: "Mock Sonnet", model_picker_enabled: false,
+              capabilities: { limits: { max_prompt_tokens: 100000 } },
+            },
             { id: "mock-opus", name: "Mock Opus", model_picker_enabled: false },
             { id: "mock-luna", model_picker_enabled: false },
             {
@@ -188,6 +191,7 @@ beforeAll(async () => {
               id: "mock-responses-only",
               supported_endpoints: ["/responses"],
               model_picker_enabled: false,
+              capabilities: { limits: { max_prompt_tokens: 272000 } },
             },
           ],
         })
@@ -766,6 +770,22 @@ describe("dialect routing", () => {
 })
 
 describe("the picker against a raw /models payload", () => {
+  test("discovered limits reach Claude's per-model settings at launch", () => {
+    const args = buildLaunchArgs({
+      baseUrl: adapter.url,
+      models: { opus: "mock-opus", sonnet: "mock-sonnet", haiku: "mock-sonnet", fable: "mock-sonnet" },
+      defaultModel: "mock-native",
+      claudeArgs: [],
+    })
+    const settings = JSON.parse(args[args.indexOf("--settings") + 1]!)
+    expect(settings.env.CLAUDE_CODE_AUTO_COMPACT_WINDOW).toBe("")
+    expect(settings.autoCompactWindow).toBe(128000)
+    expect(settings.modelSettings["mock-native"]).toEqual({ autoCompactWindow: 200000 })
+    expect(settings.modelSettings["mock-sonnet"]).toEqual({ autoCompactWindow: 100000 })
+    expect(settings.modelSettings["mock-responses-only"]).toEqual({ autoCompactWindow: 272000 })
+    expect(settings.modelSettings["mock-luna"]).toEqual({ autoCompactWindow: 128000 })
+  })
+
   // The bug this whole feature exists to fix lived in the mapping from
   // model_picker_enabled to pickerEnabled, which no test crossed: every
   // picker test hand-built its own objects. A filter reintroduced at the

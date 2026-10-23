@@ -41,7 +41,7 @@ export function windowOf(m: UpstreamModel): number | undefined {
   return m.maxPromptTokens ?? m.maxContextTokens
 }
 
-/** Reject a known custom model that Claude's global compact setting cannot represent. */
+/** Reject a known custom model that Claude's compact setting cannot represent. */
 export function validateModelSelection(
   selected: string | undefined,
   list: UpstreamModel[],
@@ -62,14 +62,6 @@ export function validateModelSelection(
   }
 }
 
-function smallestWindow(windows: Array<number | undefined>): number {
-  const fallback = fallbackInputWindow([])
-  const safe = windows.map((n) =>
-    n !== undefined && Number.isFinite(n) && n > 0 ? n : fallback,
-  )
-  return safe.length > 0 ? Math.min(...safe) : fallback
-}
-
 export function buildSettingsEnv(
   baseUrl: string,
   models: ModelMapping,
@@ -86,13 +78,6 @@ export function buildSettingsEnv(
   // the adapter forwards thinking blocks untouched; only the translation
   // dialects need them suppressed.
   const native = info?.endpoints.includes("/v1/messages") === true
-  const compactWindow = modelMeta === undefined
-    ? compactWindowFor(upstreamModels())
-    : modelMeta === null
-      ? fallbackInputWindow([])
-      : advertisedId(modelMeta.id)
-        ? undefined
-        : Math.max(100_000, smallestWindow([windowOf(modelMeta)]))
   return {
     ANTHROPIC_BASE_URL: baseUrl,
     ANTHROPIC_AUTH_TOKEN: "clco-local",
@@ -115,13 +100,9 @@ export function buildSettingsEnv(
     DISABLE_NON_ESSENTIAL_MODEL_CALLS: "1",
     // Translation dialects drop thinking blocks; the native one keeps them.
     ...(native ? {} : { CLAUDE_CODE_DISABLE_THINKING: "1" }),
-    // Catalog-known rows let Claude Code recalculate the effective window
-    // when /model switches. Non-catalog rows borrow Claude handling and need
-    // a conservative ceiling because Claude cannot know their real limit.
     CLAUDE_CODE_DISABLE_UNKNOWN_MODEL_WINDOW_ENFORCEMENT: "1",
-    ...(compactWindow === undefined
-      ? {}
-      : { CLAUDE_CODE_AUTO_COMPACT_WINDOW: String(compactWindow) }),
+    // A global env override would beat every per-model Copilot limit.
+    CLAUDE_CODE_AUTO_COMPACT_WINDOW: "",
     // Slow upstream: never abort a stream for idling.
     API_FORCE_IDLE_TIMEOUT: "0",
     API_TIMEOUT_MS: "3000000",
@@ -219,7 +200,7 @@ function conversational(m: UpstreamModel): boolean {
 
 export function buildModelPickerFrom(
   list: UpstreamModel[],
-  opts?: { selected?: string; sessionWindow?: number },
+  opts?: { selected?: string },
 ): ModelPicker | null {
   const floor = Number(process.env.CLCO_MIN_WINDOW ?? "0")
   const usable = list.filter(
@@ -236,14 +217,9 @@ export function buildModelPickerFrom(
     const borrowed = advertised ? null : resolveBehavesAs(familyOf(m.id), ids)
 
     const ctx = windowOf(m)
-    // Claude Code's global auto-compact override cannot represent a window
-    // below 100k. Do not expose a custom row whose known limit is smaller;
-    // catalog-known rows remain safe because Claude owns their per-model
-    // context handling.
+    // The setting's 100k floor cannot represent a smaller custom model safely.
     if (borrowed && ctx !== undefined && ctx < 100_000) continue
-    // [1m] is the only per-row window channel the schema has, and it is
-    // binary: 200k or 1M, nothing between. The real window goes in the
-    // description instead.
+    // The picker accepts only [1m]; intermediate limits travel in modelSettings.
     const suffix = (ctx ?? 0) >= ONE_MILLION_TOKENS ? "[1m]" : ""
     // Several slugs share one display name (five are "GPT-4o", two are
     // "GPT-5.6 Luna"), so the subtitle leads with the id: it tells the rows
@@ -253,13 +229,6 @@ export function buildModelPickerFrom(
     // Claude offers effort tiers to any row with behavesAs; say so where the
     // upstream model will just ignore them.
     if (!m.efforts) parts.push("no effort tiers")
-    // Only the shrinking direction is a hazard: the session's auto-compact
-    // budget is fixed at launch, so a smaller model can sail past its real
-    // limit. A larger one merely leaves headroom unused. Warning on both
-    // would mark nearly every row and stop meaning anything.
-    if (ctx && opts?.sessionWindow && ctx < opts.sessionWindow) {
-      parts.push(`! caps at ${Math.round(ctx / 1000)}k`)
-    }
     options.push({
       model: (advertised ?? m.id) + suffix,
       ...(m.name && m.name !== m.id ? { label: m.name } : {}),
@@ -275,24 +244,19 @@ export function buildModelPickerFrom(
   return { options: options.slice(0, 200), replaceBuiltInOptions: true }
 }
 
-/**
- * A global compact ceiling is needed only when the exact selectable lineup
- * contains a custom row. Catalog-known rows are handled by Claude Code's own
- * per-model context table after a /model switch.
- */
-export function compactWindowFor(list: UpstreamModel[]): number | undefined {
-  if (list.length === 0) return fallbackInputWindow([])
-  const picker = buildModelPickerFrom(list)
-  if (!picker) return fallbackInputWindow([])
-  if (!picker.options.some((option) => option.behavesAs)) {
-    return undefined
-  }
-  const byId = new Map(list.map((model) => [normalizeModel(model.id), model]))
-  const windows = picker.options.map((option) => {
-    const model = byId.get(normalizeModel(option.model))
-    return model ? windowOf(model) : undefined
-  })
-  return Math.max(100_000, smallestWindow(windows))
+/** /model switches must use that model's Copilot limit, including native Claude. */
+export function buildModelSettingsFrom(
+  list: UpstreamModel[],
+): Record<string, { autoCompactWindow: number }> {
+  return Object.fromEntries(list.filter(conversational).map((m) => [
+    advertisedId(m.id) ?? m.id,
+    {
+      autoCompactWindow: Math.min(ONE_MILLION_TOKENS, Math.max(
+        CLAUDE_COMPACT_FLOOR,
+        windowOf(m) ?? fallbackInputWindow([]),
+      )),
+    },
+  ]))
 }
 
 // Selected model first, then native rows, then widest window first.
@@ -308,8 +272,8 @@ function rank(
   return (routeOf(m) === "native" ? -100_000 : 0) - (windowOf(m) ?? 0) / 1000
 }
 
-function buildModelPicker(selected?: string, sessionWindow?: number) {
-  return buildModelPickerFrom(upstreamModels(), { selected, sessionWindow })
+function buildModelPicker(selected?: string) {
+  return buildModelPickerFrom(upstreamModels(), { selected })
 }
 
 // The documented channel for "this provider id is really that model": a map
@@ -378,6 +342,8 @@ export function buildLaunchArgs(plan: LaunchPlan): string[] {
   // to prevent.
   const settings = JSON.stringify({
     env: { ...env, ...(configDir ? { CLAUDE_CONFIG_DIR: configDir } : {}) },
+    autoCompactWindow: fallbackInputWindow([]),
+    modelSettings: buildModelSettingsFrom(upstreamModels()),
     ...(picker ? { modelPicker: picker } : {}),
     ...(overrides ? { modelOverrides: overrides } : {}),
     ...(userPickedModel || !plan.defaultModel ? {} : { model: plan.defaultModel }),
