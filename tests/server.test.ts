@@ -4,6 +4,8 @@
 // terminal chunks), count_tokens, and error mapping — no GitHub auth.
 
 import { afterAll, beforeAll, describe, expect, test } from "bun:test"
+import { createServer } from "node:http"
+import type { AddressInfo } from "node:net"
 import {
   sanitizeBeta,
   startServer,
@@ -916,4 +918,64 @@ describe("auth retry across dialect fallbacks", () => {
       mock.stop(true)
     }
   })
+})
+
+describe("client cancellation", () => {
+  for (const [dialect, model, path] of [
+    ["native", "mock-native", "/v1/messages"],
+    ["chat", "mock-sonnet", "/chat/completions"],
+    ["Responses", "mock-responses-only", "/responses"],
+  ]) {
+    test.each(["headers", "stream"])(`${dialect} cancellation closes the upstream while waiting for %s`, async (phase) => {
+      const entered = Promise.withResolvers<void>()
+      const closed = Promise.withResolvers<void>()
+      const paths: string[] = []
+      const mock = createServer((req, res) => {
+        paths.push(req.url ?? "")
+        req.resume()
+        res.once("close", () => closed.resolve())
+        if (phase === "stream") {
+          res.writeHead(200, { "content-type": "text/event-stream" })
+          res.write(dialect === "native"
+            ? 'event: ping\ndata: {"type":"ping"}\n\n'
+            : dialect === "Responses"
+              ? 'data: {"type":"response.output_text.delta","delta":"hello"}\n\n'
+              : chunkLine({ content: "hello" }) + "\n\n")
+        }
+        entered.resolve()
+      })
+      await new Promise<void>((resolve) => mock.listen(0, "127.0.0.1", resolve))
+      const server = await startServer({ upstream: `http://127.0.0.1:${(mock.address() as AddressInfo).port}` })
+      const controller = new AbortController()
+      let reader: ReadableStreamDefaultReader<Uint8Array> | undefined
+      let timeout: ReturnType<typeof setTimeout> | undefined
+      try {
+        const response = fetch(`${server.url}/v1/messages`, {
+          method: "POST", headers: { ...AUTH, "content-type": "application/json" },
+          body: JSON.stringify({ model, max_tokens: 32, stream: phase === "stream", messages: [{ role: "user", content: "hi" }] }),
+          signal: controller.signal,
+        }).catch(() => null)
+        await entered.promise
+        if (phase === "stream") {
+          reader = (await response)!.body!.getReader()
+          expect((await reader.read()).done).toBe(false)
+        }
+        controller.abort()
+        await response
+        const disconnected = await Promise.race([
+          closed.promise.then(() => true),
+          new Promise<boolean>((resolve) => { timeout = setTimeout(() => resolve(false), 1000) }),
+        ])
+        expect(disconnected).toBe(true)
+        expect(paths).toEqual([path])
+      } finally {
+        clearTimeout(timeout)
+        controller.abort()
+        await reader?.cancel().catch(() => {})
+        server.stop()
+        mock.closeAllConnections()
+        await new Promise<void>((resolve) => mock.close(() => resolve()))
+      }
+    })
+  }
 })

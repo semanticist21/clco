@@ -166,6 +166,7 @@ async function copilotChat(
   anthropic: AnthropicRequest,
   upstreamBase: string,
   mockToken: boolean,
+  signal: AbortSignal,
   native?: NativeRequest,
   allowedEfforts?: string[] | null,
 ): Promise<ChatResult> {
@@ -179,6 +180,7 @@ async function copilotChat(
   let dialect = routes.select(payload.model, info, native !== undefined && !process.env.CLCO_NO_PASSTHROUGH)
   let attempt = 0
   while (attempt < 2) {
+    signal.throwIfAborted()
     const token = mockToken ? "mock" : await getCopilotToken(attempt > 0)
     const endpoint = dialect === "native"
       ? "/v1/messages"
@@ -205,11 +207,14 @@ async function copilotChat(
         : dialect === "responses"
           ? JSON.stringify(toResponsesRequest(anthropic, allowedEfforts))
           : chatBody,
+      signal,
     })
+    signal.throwIfAborted()
 
     if ((res.status === 401 || res.status === 403) && attempt === 0) {
       // Free the parked socket before retrying with a fresh token.
       await res.body?.cancel().catch(() => {})
+      signal.throwIfAborted()
       invalidateCopilotToken()
       attempt++
       continue
@@ -224,6 +229,7 @@ async function copilotChat(
     }
 
     const text = await res.text()
+    signal.throwIfAborted()
     // A shape rejection falls back for this request. Only model/endpoint
     // evidence changes future routing. Quota, auth and rate-limit failures
     // are not shape problems, so they surface
@@ -458,6 +464,7 @@ async function handleMessages(
       payload,
       upstreamBase,
       mockToken,
+      req.signal,
       {
         body: nativeBody,
         anthropicVersion: req.headers.get("anthropic-version") ?? undefined,
