@@ -30,7 +30,7 @@ async function validateUrl(raw: string): Promise<URL> {
   return url
 }
 async function pinnedFetch(url: URL, init: RequestInit): Promise<Response> {
-  const address = await publicAddress(url); const target = new URL(url); const originalHost = target.host; target.hostname = address; const headers = new Headers(init.headers); headers.set("host", originalHost); const options = { ...init, headers } as RequestInit & { tls?: { serverName: string } }; if (url.protocol === "https:") options.tls = { serverName: url.hostname }; return fetch(target, options as RequestInit)
+  const address = await publicAddress(url); const target = new URL(url); const originalHost = target.host; target.hostname = address.includes(":") ? `[${address}]` : address; const headers = new Headers(init.headers); headers.set("host", originalHost); const options = { ...init, headers } as RequestInit & { tls?: { serverName: string } }; if (url.protocol === "https:") options.tls = { serverName: url.hostname }; return fetch(target, options as RequestInit)
 }
 async function readLimited(response: Response): Promise<Uint8Array> {
   if (!response.body) throw new WebFetchError("web_fetch received an empty response")

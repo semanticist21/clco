@@ -8,6 +8,7 @@
 import { getCopilotToken } from "./token"
 import { copilotBaseUrl, copilotFetch, copilotRequestHeaders } from "./api"
 import { fetchContent, WebFetchError } from "./webfetch"
+import { parseHTML } from "linkedom"
 
 export const SEARCH_AGENT = process.env.CLCO_SEARCH_AGENT ?? "copilot-search-a"
 const MAX_ROUNDS = 4
@@ -47,15 +48,34 @@ async function ddg(query: string): Promise<string> {
     headers: { "User-Agent": UA },
     signal: AbortSignal.timeout(20_000),
   })
-  const html = await res.text()
-  const results = [...html.matchAll(/class="result__a"[^>]*>([^<]+)<\/a>[\s\S]*?class="result__snippet"[^>]*>([\s\S]*?)<\/a>/g)]
-    .slice(0, 5)
-    .map((m, i) => `${i + 1}. ${strip(m[1]!)}: ${strip(m[2]!).slice(0, 250)}`)
-  return results.join("\n") || "(no results)"
-}
-
-function strip(html: string): string {
-  return html.replace(/<[^>]+>/g, "").replace(/&amp;/g, "&").replace(/&#x27;/g, "'").replace(/&quot;/g, '"').trim()
+  if (!res.ok || res.status === 202) throw new WebFetchError(`web_search DuckDuckGo failed: HTTP ${res.status}`)
+  const { document } = parseHTML(await res.text())
+  if (document.querySelector('#anomaly-form, #challenge-form, .anomaly-modal, form[action*="anomaly.js"]')) {
+    throw new WebFetchError("web_search DuckDuckGo returned a bot challenge; try again later")
+  }
+  const results: string[] = []
+  for (const anchor of document.querySelectorAll(".result__a")) {
+    const rawHref = anchor.getAttribute("href")
+    if (!rawHref) continue
+    let url: URL
+    try {
+      const href = new URL(rawHref, "https://html.duckduckgo.com")
+      const destination = /(^|\.)duckduckgo\.com$/.test(href.hostname) && href.pathname === "/l/"
+        ? href.searchParams.get("uddg")
+        : href.href
+      if (!destination) continue
+      url = new URL(destination)
+    } catch { continue }
+    if (!["http:", "https:"].includes(url.protocol)) continue
+    const title = anchor.textContent?.replace(/\s+/g, " ").trim() ?? ""
+    if (!title) continue
+    const snippet = anchor.closest(".result")?.querySelector(".result__snippet")?.textContent?.replace(/\s+/g, " ").trim() ?? ""
+    results.push(`${results.length + 1}. ${title}\n${url.href}\n${snippet.slice(0, 250)}`)
+    if (results.length === 5) break
+  }
+  if (results.length > 0) return results.join("\n")
+  if (document.querySelector(".no-results, .result--no-result")) return "(no results)"
+  throw new WebFetchError("web_search could not parse DuckDuckGo results")
 }
 
 async function readUrl(url: string): Promise<string> {
@@ -90,7 +110,11 @@ export async function searchLoop(query: string, deps: LoopDeps): Promise<string>
     const { content, calls } = await deps.ask(messages)
     if (!calls.length) return content.trim() || material || "(no results)"
     messages.push({ role: "assistant", content: content || null, tool_calls: calls })
-    for (const call of calls.slice(0, MAX_CALLS_PER_ROUND)) {
+    for (const [index, call] of calls.entries()) {
+      if (index >= MAX_CALLS_PER_ROUND) {
+        messages.push({ role: "tool", tool_call_id: call.id, content: `(skipped: limit of ${MAX_CALLS_PER_ROUND} tool calls per round)` })
+        continue
+      }
       let args: { query?: string; url?: string } = {}
       try { args = JSON.parse(call.function.arguments || "{}") } catch { /* empty args stay empty */ }
       // Re-running a failed or finished call only burns rounds; replay it.
