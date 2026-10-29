@@ -23,7 +23,7 @@ import {
   upstreamModels,
 } from "./token"
 import { setAdapterLogSink, startServer } from "./server"
-import { buildModelPickerFrom, resolveClaude, runClaude } from "./spawn"
+import { buildModelPickerFrom, modelFromArgs, resolveClaude, runClaude } from "./spawn"
 import { isTlsTrustError, tlsHint } from "./tls"
 import {
   extensionHint,
@@ -44,12 +44,10 @@ import {
 } from "./setup"
 import { normalizeModel } from "./translate"
 
-// Single source: the package manifest. appDir() resolves the install even
-// when clco is started through the launcher from another directory.
+// Read the executing package, even when another clco installation exists.
 const VERSION: string = await (async () => {
   try {
-    const dir = appDir() ?? join(import.meta.dir, "..")
-    const raw = await readFile(join(dir, "package.json"), "utf8")
+    const raw = await readFile(join(import.meta.dir, "..", "package.json"), "utf8")
     return (JSON.parse(raw) as { version?: string }).version ?? "unknown"
   } catch {
     return "unknown"
@@ -745,8 +743,7 @@ async function main(): Promise<void> {
     if (interactive && !printMode) {
       setup = await runSetup()
     } else {
-      // Never block an unattended run on a prompt; everything stays off,
-      // which is exactly how clco behaved before setup existed.
+      // Never enable unattended permission bypass or browser access before setup.
       console.error(
         "[clco] No startup defaults yet - run `clco setup` to set them.",
       )
@@ -762,7 +759,8 @@ async function main(): Promise<void> {
   if (discoveryNote) console.error(discoveryNote)
   const list = upstreamModels()
 
-  let defaultModel: string | undefined
+  const explicitModel = modelFromArgs(args.claudeArgs, models)
+  let defaultModel = explicitModel
   const prefs = await loadPrefs()
   // Offer exactly what /model will: the raw upstream list also carries
   // embeddings and Copilot's internal plumbing, which cannot hold a
@@ -777,11 +775,12 @@ async function main(): Promise<void> {
       : undefined
   if (
     args.command === "run" &&
+    explicitModel === undefined &&
     !printMode &&
     interactive &&
     !process.env.CLCO_NO_SELECT &&
     shouldSelectModel(setup, args.overrides) &&
-    list.length > 0
+    pickerRows.length > 0
   ) {
     const rows = pickerRows
     const last = remembered
@@ -812,7 +811,7 @@ async function main(): Promise<void> {
   } else if (args.command !== "serve") {
     // serve never calls runClaude, so a model resolved here is unreachable -
     // and a live-looking variable on a dead path is a trap for the next reader.
-    defaultModel = modelWithoutPrompt(remembered, offered, models.sonnet)
+    defaultModel = explicitModel ?? modelWithoutPrompt(remembered, offered, models.sonnet)
   }
 
   const server = await startServer({ port: args.port })
@@ -841,6 +840,11 @@ async function main(): Promise<void> {
       ? `+ slots: ${slots}`
       : `+ model: ${defaultModel ?? "(claude default)"} (${slots})`,
   )
+  if (args.command === "serve") {
+    console.error("Adapter running... (Ctrl+C to stop)")
+    await new Promise<never>(() => {})
+  }
+
   const browserEnabled =
     setup?.browser === true && args.overrides.browser !== false
   const browserExtension = browserEnabled ? await extensionInstalled() : false
@@ -851,7 +855,12 @@ async function main(): Promise<void> {
   // user passes their own --mcp-config, and claiming success there would be
   // the same trap as registering a server with no extension.
   const injected = setupClaudeArgs(setup, args.overrides, args.claudeArgs, browserExtension, searchAgent)
-  const registered = injected.some((a) => a.startsWith("--mcp-config="))
+  const mcpArg = injected.find((arg) => arg.startsWith("--mcp-config="))
+  const registered = mcpArg
+    ? (JSON.parse(mcpArg.slice("--mcp-config=".length)) as { mcpServers: Record<string, unknown> }).mcpServers
+    : {}
+  const browserRegistered = Object.hasOwn(registered, "playwright")
+  const webRegistered = Object.hasOwn(registered, "clco_web")
   const browserLine = startupLine(
     browserEnabled,
     browserExtension,
@@ -860,26 +869,21 @@ async function main(): Promise<void> {
     // Only worth asking when everything else is in place - and only about the
     // default spec, since the probe hits registry.npmjs.org and can say
     // nothing true about an internal mirror named by CLCO_MCP_PACKAGE.
-    browserExtension && registered && probesDefaultRegistry()
+    browserExtension && browserRegistered && probesDefaultRegistry()
       ? await registryStatus()
       : undefined,
-    browserEnabled && browserExtension ? registered : undefined,
+    browserEnabled && browserExtension ? browserRegistered : undefined,
   )
   if (browserLine) console.error(browserLine)
   console.error(
     webEnabled && !searchAgent
       ? "+ web: unavailable (Copilot exposed no search-agent model)"
-      : webEnabled && registered
+      : webEnabled && webRegistered
       ? `+ web: search via ${searchAgent} planner + live local execution`
       : webEnabled
         ? "+ web: enabled in setup, but not registered because --mcp-config was supplied"
         : "+ web: disabled (run `clco setup` to enable)",
   )
-
-  if (args.command === "serve") {
-    console.error("Adapter running... (Ctrl+C to stop)")
-    await new Promise<never>(() => {})
-  }
 
   const code = await runClaude({
     baseUrl: server.url,

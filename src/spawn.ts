@@ -4,7 +4,6 @@
 // block cannot swallow it) without touching any config file. The same env is
 // also merged into the child process environment.
 
-import { readFile, writeFile } from "node:fs/promises"
 import { homedir } from "node:os"
 import { join } from "node:path"
 import {
@@ -14,7 +13,6 @@ import {
   resolveBehavesAs,
 } from "./catalog"
 import {
-  modelInfo,
   upstreamModels,
   type ModelMapping,
   type UpstreamModel,
@@ -65,19 +63,7 @@ export function validateModelSelection(
 export function buildSettingsEnv(
   baseUrl: string,
   models: ModelMapping,
-  defaultModel?: string,
-  /** Defaults to the discovery cache; injected directly in tests. */
-  modelMeta?: UpstreamModel | null,
 ): Record<string, string> {
-  const selected = defaultModel
-  // The selection may be an advertised catalog-form id; the discovery cache
-  // is keyed by upstream slug, so resolve before looking it up.
-  const info =
-    modelMeta === undefined ? (selected ? modelInfo(normalizeModel(selected)) : undefined) : modelMeta
-  // Claude models are served through Copilot's native Anthropic endpoint, so
-  // the adapter forwards thinking blocks untouched; only the translation
-  // dialects need them suppressed.
-  const native = info?.endpoints.includes("/v1/messages") === true
   return {
     ANTHROPIC_BASE_URL: baseUrl,
     ANTHROPIC_AUTH_TOKEN: "clco-local",
@@ -98,8 +84,7 @@ export function buildSettingsEnv(
     DISABLE_TELEMETRY: "1",
     DISABLE_AUTOUPDATER: "1",
     DISABLE_NON_ESSENTIAL_MODEL_CALLS: "1",
-    // Translation dialects drop thinking blocks; the native one keeps them.
-    ...(native ? {} : { CLAUDE_CODE_DISABLE_THINKING: "1" }),
+    // Thinking is filtered per request by translated dialects, so /model can switch to native.
     CLAUDE_CODE_DISABLE_UNKNOWN_MODEL_WINDOW_ENFORCEMENT: "1",
     // A global env override would beat every per-model Copilot limit.
     CLAUDE_CODE_AUTO_COMPACT_WINDOW: "",
@@ -301,6 +286,15 @@ export interface LaunchPlan {
   configDir?: string | null
 }
 
+/** Explicit Claude flags outrank the picker and saved model, including slot aliases. */
+export function modelFromArgs(args: readonly string[], models: ModelMapping): string | undefined {
+  const index = args.findLastIndex((arg) => arg === "--model" || arg.startsWith("--model="))
+  if (index < 0) return undefined
+  const arg = args[index]
+  const value = arg === "--model" ? args[index + 1] ?? "" : arg.slice("--model=".length)
+  return Object.hasOwn(models, value) ? models[value as keyof ModelMapping] : value
+}
+
 /**
  * The argv clco hands claude, as a pure function.
  *
@@ -309,20 +303,12 @@ export interface LaunchPlan {
  * precisely because this was tangled up with Bun.spawn.
  */
 export function buildLaunchArgs(plan: LaunchPlan): string[] {
-  const userPickedModel = plan.claudeArgs.some(
-    (a) => a === "--model" || a.startsWith("--model="),
-  )
-  const userModelIndex = plan.claudeArgs.findIndex(
-    (a) => a === "--model" || a.startsWith("--model="),
-  )
-  const userModel = userModelIndex < 0
-    ? undefined
-    : plan.claudeArgs[userModelIndex]!.startsWith("--model=")
-      ? plan.claudeArgs[userModelIndex]!.slice("--model=".length)
-      : plan.claudeArgs[userModelIndex + 1]
-  validateModelSelection(userModel ?? plan.defaultModel, upstreamModels())
-  const env = buildSettingsEnv(plan.baseUrl, plan.models, plan.defaultModel)
-  const picker = buildModelPicker(plan.defaultModel ?? plan.models.sonnet)
+  const userModel = modelFromArgs(plan.claudeArgs, plan.models)
+  const userPickedModel = userModel !== undefined
+  const selected = userModel ?? plan.defaultModel
+  validateModelSelection(selected, upstreamModels())
+  const env = buildSettingsEnv(plan.baseUrl, plan.models)
+  const picker = buildModelPicker(selected ?? plan.models.sonnet)
   const overrides = buildModelOverridesFrom(upstreamModels())
   const configDir = plan.configDir ?? undefined
   // The model rides in the settings blob as well as in --model, because
@@ -360,16 +346,8 @@ export function buildLaunchEnv(
   plan: LaunchPlan,
   extraEnv?: Record<string, string>,
 ): Record<string, string | undefined> {
-  const userModelIndex = plan.claudeArgs.findIndex(
-    (a) => a === "--model" || a.startsWith("--model="),
-  )
-  const userModel = userModelIndex < 0
-    ? undefined
-    : plan.claudeArgs[userModelIndex]!.startsWith("--model=")
-      ? plan.claudeArgs[userModelIndex]!.slice("--model=".length)
-      : plan.claudeArgs[userModelIndex + 1]
-  validateModelSelection(userModel ?? plan.defaultModel, upstreamModels())
-  const env = buildSettingsEnv(plan.baseUrl, plan.models, plan.defaultModel)
+  validateModelSelection(modelFromArgs(plan.claudeArgs, plan.models) ?? plan.defaultModel, upstreamModels())
+  const env = buildSettingsEnv(plan.baseUrl, plan.models)
   const configDir = plan.configDir ?? undefined
   const childEnv: Record<string, string | undefined> = {
     ...process.env,

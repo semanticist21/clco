@@ -24,9 +24,7 @@ export interface SetupOverrides {
 
 // What the first-run prompts come pre-filled with: these are the options
 // people install clco for, so Enter-through should land on the useful setup.
-// A future option added to an EXISTING setup is absent from the stored
-// object, i.e. off, which is the conservative direction for a change nobody
-// asked for.
+// Missing web preferences also mean on for existing installations.
 export const SETUP_DEFAULTS: Omit<SetupPrefs, "version"> = {
   bypass: true,
   select: true,
@@ -112,17 +110,16 @@ export async function runSetup(): Promise<SetupPrefs> {
 
 /**
  * The saved setup, or null when it has never been run. Also reports a version
- * bump once: a new option defaults to off, and saying so beats leaving it
- * undiscovered — but nagging on every launch afterwards does not.
+ * bump once so existing users can review the available options.
  */
 export async function loadSetup(): Promise<SetupPrefs | null> {
   const prefs = await loadPrefs()
   if (!prefs.setup) return null
   if (prefs.setup.version < SETUP_VERSION) {
     console.error(
-      "[clco] New setup options are available (off by default) - run `clco setup` to enable them",
+      "[clco] New setup options are available - run `clco setup` to review them",
     )
-    // Record that the notice was shown; the options themselves stay off.
+    // Record that the notice was shown without replacing saved choices.
     await savePrefs({
       ...prefs,
       setup: { ...prefs.setup, version: SETUP_VERSION },
@@ -145,14 +142,13 @@ export function setupClaudeArgs(
   /** The Copilot search-agent model the web tool plans with. */
   searchAgent?: string,
 ): string[] {
-  if (!setup) return []
   // Match the `--flag=value` form too: an exact comparison let a user's own
   // --mcp-config=x.json through, and clco then injected a second one.
   const has = (flag: string) =>
     claudeArgs.some((a) => a === flag || a.startsWith(`${flag}=`))
   const out: string[] = []
   if (
-    setup.bypass &&
+    setup?.bypass &&
     overrides.bypass !== false &&
     !has("--dangerously-skip-permissions") &&
     // An explicit permission mode is a deliberate choice; do not override it.
@@ -162,10 +158,10 @@ export function setupClaudeArgs(
   }
   // Registered per session rather than written into the user's MCP config, so
   // clco never edits configuration that outlives it.
-  const browserRequested = setup.browser && overrides.browser !== false && browserExtension
-  const webRequested = setup.web === true && overrides.web !== false
+  const browserRequested = setup?.browser === true && overrides.browser !== false && browserExtension
+  const webRequested = setup?.web !== false && overrides.web !== false && searchAgent !== undefined
   if ((browserRequested || webRequested) && !has("--mcp-config")) {
-    const config = combinedMcpConfig(browserExtension, webRequested, searchAgent)
+    const config = combinedMcpConfig(browserRequested, webRequested, searchAgent)
     // One argv element: claude's --mcp-config is variadic, so a separate value
     // would also swallow a positional prompt that follows (`clco -- "ask"`).
     if (config) out.push(`--mcp-config=${config}`)

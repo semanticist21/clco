@@ -66,6 +66,7 @@ clco
    | Question | Default | What it does |
    |---|---|---|
    | Run without permission prompts? | **Yes** | Passes `--dangerously-skip-permissions`, so claude edits files and runs commands without asking. `clco --no-bypass` for one session. |
+   | Search the web via Copilot’s search planner? | **Yes** | Registers the web search MCP for this session. Older settings also default to Yes; a saved No stays off. `clco --no-web` for one session. |
    | Enable Playwright MCP for browser control? | **Yes** | Registers the Playwright MCP server for clco sessions only. **Also needs a Chrome extension you install yourself** — see [Browser control](#browser-control). `clco --no-browser` for one session. |
    | Pick a model each time clco starts? | **Yes** | Shows the model prompt at launch. Answering No reuses your last pick. `clco --no-select` for one session. |
 
@@ -88,7 +89,15 @@ Claude's built-in Fetch works as-is: it fetches pages locally and only the
 summarizing model call rides the adapter. Claude's built-in WebSearch cannot
 work here - Anthropic executes it server-side, and Copilot's endpoint rejects
 a native web_search tool - so the adapter drops it instead of sending a
-broken request. No web MCP server is registered.
+broken request. clco registers a session-only `clco_web` MCP server when
+Copilot exposes a search-agent model. That model plans searches; clco fetches
+live search results and public pages locally, then returns the answer and sources.
+
+Web search defaults to on, including older settings without a web preference.
+An explicit saved No stays off. Use `clco --no-web` to disable it for one run,
+or `clco setup` to change the saved choice. A user-supplied `--mcp-config` owns
+the session's MCP configuration, so clco adds no web or browser server then.
+Search-provider failures and bot challenges are reported as errors.
 
 ## Usage
 
@@ -96,7 +105,7 @@ broken request. No web MCP server is registered.
 clco                   # a session
 clco -p "question"     # anything clco doesn't own goes straight to claude
 clco status            # account, plan, and every model's route/policy/context
-clco setup             # change the three answers above
+clco setup             # change the four answers above
 clco help              # all commands and environment variables
 ```
 
@@ -165,6 +174,7 @@ Pinning is not an offline mode: browser control needs npm either way.
 
 Nothing clco reads from your disk leaves the machine. Its outbound requests are
 GitHub login, the Copilot token exchange, the model list, your chat itself,
+web searches and public pages requested by the web tool,
 plus — with browser control on — resolving `@playwright/mcp` against npm each
 session, and checking GitHub for a staged update when you run `clco update`.
 

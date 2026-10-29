@@ -55,6 +55,25 @@ test("web setup registers only the web tool server, with the planner model", () 
   ])
 })
 
+describe("legacy web preferences", () => {
+  test("enables web search without enabling browser or bypass before setup", () => {
+    const args = setupClaudeArgs(null, {}, [], true, "copilot-search-a")
+    const config = JSON.parse(args.find(isMcpConfig)!.slice("--mcp-config=".length))
+    expect(Object.keys(config.mcpServers)).toEqual(["clco_web"])
+    expect(args).not.toContain("--dangerously-skip-permissions")
+  })
+
+  test("registers web for old settings and respects explicit opt-outs", () => {
+    const args = setupClaudeArgs(saved(), {}, [], false, "copilot-search-a")
+    expect(JSON.parse(args.find(isMcpConfig)!.slice("--mcp-config=".length)).mcpServers.clco_web).toBeDefined()
+    for (const [prefs, overrides] of [[saved({ web: false }), {}], [saved(), { web: false }]] as const) {
+      expect(setupClaudeArgs(prefs, overrides, [], false, "copilot-search-a").some(isMcpConfig)).toBe(false)
+    }
+    expect(setupClaudeArgs(saved(), {}, [], false).some(isMcpConfig)).toBe(false)
+    expect(setupClaudeArgs(saved(), {}, ["--mcp-config=x.json"], false, "copilot-search-a").some(isMcpConfig)).toBe(false)
+  })
+})
+
 describe("setupClaudeArgs", () => {
   test("adds the flags the saved setup implies", () => {
     expect(setupClaudeArgs(saved(), {}, [])).toEqual([
