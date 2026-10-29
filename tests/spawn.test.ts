@@ -12,6 +12,7 @@ import {
   buildModelSettingsFrom,
   buildSettingsEnv,
   validateModelSelection,
+  modelFromArgs,
 } from "../src/spawn"
 
 describe("buildModelPickerFrom", () => {
@@ -206,38 +207,18 @@ describe("buildModelOverridesFrom", () => {
 describe("buildSettingsEnv", () => {
   const models = { opus: "o", sonnet: "s", haiku: "h", fable: "f" }
 
-  test("catalog-native models keep thinking without pinning a global compact window", () => {
-    const env = buildSettingsEnv("http://127.0.0.1:1", models, "mock-native", {
-      id: "claude-opus-5",
-      name: "Claude Opus",
-      endpoints: ["/v1/messages", "/chat/completions"],
-      efforts: ["low", "medium", "high"],
-      maxPromptTokens: 200000,
-      maxContextTokens: 264000,
-    })
-    // Pinning ANTHROPIC_MODEL makes every /model switch cosmetic — claude
-    // keeps using the pinned id and says so. The choice travels as --model.
+  test("leaves thinking available for later native /model switches", () => {
+    const env = buildSettingsEnv("http://127.0.0.1:1", models)
     expect(env.ANTHROPIC_MODEL).toBeUndefined()
     expect(env.CLAUDE_CODE_AUTO_COMPACT_WINDOW).toBe("")
     expect(env.CLAUDE_CODE_DISABLE_THINKING).toBeUndefined()
-  })
-
-  test("translated dialects still suppress thinking", () => {
-    const env = buildSettingsEnv("http://127.0.0.1:1", models, "luna", {
-      id: "luna",
-      name: "Luna",
-      endpoints: ["/responses"],
-      efforts: null,
-      maxContextTokens: 328000,
-    })
-    expect(env.CLAUDE_CODE_AUTO_COMPACT_WINDOW).toBe("")
-    expect(env.CLAUDE_CODE_DISABLE_THINKING).toBe("1")
-  })
-
-  test("unknown models also leave the global override cleared", () => {
-    const env = buildSettingsEnv("http://127.0.0.1:1", models, "mystery", null)
-    expect(env.CLAUDE_CODE_AUTO_COMPACT_WINDOW).toBe("")
-    expect(env.CLAUDE_CODE_DISABLE_THINKING).toBe("1")
+    for (const claudeArgs of [["--model", "sonnet"], ["--model=opus"], ["--model", "gpt-4.1"]]) {
+      const plan = { baseUrl: "http://127.0.0.1:1", models, defaultModel: "gpt-4.1", claudeArgs }
+      expect(buildLaunchEnv(plan).CLAUDE_CODE_DISABLE_THINKING).toBeUndefined()
+      const args = buildLaunchArgs(plan)
+      const settings = JSON.parse(args[args.indexOf("--settings") + 1])
+      expect(settings.env.CLAUDE_CODE_DISABLE_THINKING).toBeUndefined()
+    }
   })
 
   test("an inherited global cap cannot override the per-model limits", () => {
@@ -322,7 +303,7 @@ describe("buildSettingsEnv — what must not be there", () => {
   // ~/.claude/cache/gateway-models.json. It is now absent rather than set to
   // "0", and an absence survives no refactor unless something asserts it.
   test("gateway discovery stays off, so nothing writes into ~/.claude", () => {
-    const env = buildSettingsEnv("http://127.0.0.1:1", models, "m", null)
+    const env = buildSettingsEnv("http://127.0.0.1:1", models)
     expect(env.CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY).toBeUndefined()
   })
 })
@@ -375,5 +356,20 @@ describe("the model clco chose has to survive a project settings file", () => {
     })
     expect(settingsOf(args).model).toBeUndefined()
     expect(args).not.toContain("--model")
+  })
+})
+
+
+describe("explicit model flags", () => {
+  const slots = { opus: "claude-opus-5", sonnet: "claude-sonnet-5", haiku: "claude-haiku-4.5", fable: "claude-fable-5.1" }
+
+  test("resolves both flag forms and every slot alias", () => {
+    expect(modelFromArgs([], slots)).toBeUndefined()
+    for (const slot of ["opus", "sonnet", "haiku", "fable"] as const) {
+      expect(modelFromArgs(["--model", slot], slots)).toBe(slots[slot])
+      expect(modelFromArgs(["--model=" + slot], slots)).toBe(slots[slot])
+    }
+    expect(modelFromArgs(["--model", "kimi-k3"], slots)).toBe("kimi-k3")
+    expect(modelFromArgs(["--model", "sonnet", "--model=gpt-4.1"], slots)).toBe("gpt-4.1")
   })
 })

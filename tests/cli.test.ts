@@ -2,6 +2,9 @@
 // bare words are typos that must fail loudly rather than start a session.
 import { describe, expect, test } from "bun:test"
 import { npmUpdateMessage, parseArgs } from "../src/cli"
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
 
 test("npm installs have an npm update path", () => {
   expect(npmUpdateMessage()).toContain("npm install --global @semanticist14/clco@latest")
@@ -72,4 +75,23 @@ describe("parseArgs — version", () => {
   test("recognises the version command", () => {
     expect(parseArgs(["version"]).command).toBe("version")
   })
+})
+
+
+test("version comes from the running package, not another installation", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "clco-version-"))
+  try {
+    await mkdir(join(dir, ".git"))
+    await writeFile(join(dir, "package.json"), JSON.stringify({ version: "99.0.0" }))
+    const cli = join(import.meta.dir, "..", "src", "cli.ts")
+    const proc = Bun.spawnSync([process.execPath, cli, "version"], {
+      env: { ...process.env, CLCO_APP_DIR: dir },
+      stdout: "pipe", stderr: "pipe",
+    })
+    const manifest = await Bun.file(join(import.meta.dir, "..", "package.json")).json()
+    expect(proc.exitCode).toBe(0)
+    expect(proc.stdout.toString().trim()).toBe(manifest.version)
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
 })
