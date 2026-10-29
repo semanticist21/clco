@@ -23,6 +23,7 @@ import {
   type ToolResultBlock,
   type ToolUseBlock,
   classifyContent,
+  imageUrl,
 } from "./blocks"
 
 function marked(blocks: unknown): boolean {
@@ -109,7 +110,7 @@ function toImagePart(block: ImageBlock): OpenAIImagePart {
   return {
     type: "image_url",
     image_url: {
-      url: `data:${block.source.media_type};base64,${block.source.data}`,
+      url: imageUrl(block),
     },
   }
 }
@@ -376,6 +377,8 @@ export function translateResponse(upstream: OpenAIResponse): AnthropicResponse {
       if (part.type === "text") content.push({ type: "text", text: part.text })
     }
   }
+  const refusal = choice?.message?.refusal
+  if (refusal) content.push({ type: "text", text: refusal })
   for (const call of choice?.message?.tool_calls ?? []) {
     let input: Record<string, unknown> = {}
     try {

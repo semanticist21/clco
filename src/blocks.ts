@@ -33,7 +33,16 @@ export interface RedactedThinkingBlock {
 
 export interface ImageBlock {
   type: "image"
-  source: { type: string; media_type: string; data: string }
+  source:
+    | { type: "base64"; media_type: string; data: string }
+    | { type: "url"; url: string }
+}
+
+export function imageUrl(block: ImageBlock): string {
+  const source = block.source
+  return source.type === "url"
+    ? source.url
+    : `data:${source.media_type};base64,${source.data}`
 }
 
 /** A file attachment. No translated dialect has anywhere to put one. */

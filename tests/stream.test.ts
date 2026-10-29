@@ -24,6 +24,22 @@ describe("StreamTranslator", () => {
   const rawChunk = (body: Record<string, unknown>): OpenAIResponse =>
     body as unknown as OpenAIResponse
 
+  test("streams refusal text alongside ordinary text", () => {
+    const t = new StreamTranslator("m")
+    const events = [
+      ...t.pushChunk(chunk({ content: "Notice: ", refusal: "I cannot " })),
+      ...t.pushChunk(chunk({ refusal: "help with that request." })),
+      ...t.pushChunk(chunk({}, "stop")),
+      ...t.finish(),
+    ]
+    const text = events.filter((e) => e.event === "content_block_delta")
+      .map((e) => (e.data.delta as { text: string }).text).join("")
+    expect(text).toBe("Notice: I cannot help with that request.")
+    expect(events.find((e) => e.event === "message_delta")?.data.delta)
+      .toEqual({ stop_reason: "end_turn", stop_sequence: null })
+    expect(events.filter((e) => e.event === "content_block_start")).toHaveLength(1)
+  })
+
   test("streams text deltas into one block, then tool_use with json deltas", () => {
     const t = new StreamTranslator("m")
     const events = [
