@@ -208,6 +208,20 @@ describe("translateRequest", () => {
     })
   })
 
+  test.each([false, true])("preserves URL images with tool_result=%s", (toolResult) => {
+    const image = { type: "image" as const, source: { type: "url" as const, url: "https://example.com/image.png" } }
+    const out = translateRequest({
+      model: "m", max_tokens: 1,
+      messages: [{ role: "user", content: toolResult
+        ? [{ type: "tool_result", tool_use_id: "t1", content: [image] }]
+        : [image] }],
+    })
+    expect(out.messages.at(-1)?.content).toEqual([
+      { type: "image_url", image_url: { url: image.source.url } },
+    ])
+    if (toolResult) expect(out.messages[0]).toMatchObject({ role: "tool", tool_call_id: "t1" })
+  })
+
   test("empty stop_sequences coerce to null; streaming sets stream_options", () => {
     const out = translateRequest({
       model: "m",
@@ -297,6 +311,20 @@ describe("translateRequest", () => {
 })
 
 describe("translateResponse", () => {
+  test.each([null, "Notice: "])("preserves refusal text alongside content=%s", (text) => {
+    const out = translateResponse({
+      id: "r", model: "m", choices: [{
+        index: 0, finish_reason: "stop",
+        message: { role: "assistant", content: text, refusal: "I cannot help with that request." },
+      }],
+    })
+    expect(out.content).toEqual([
+      ...(text ? [{ type: "text" as const, text }] : []),
+      { type: "text", text: "I cannot help with that request." },
+    ])
+    expect(out.stop_reason).toBe("end_turn")
+  })
+
   test("maps text, tool calls, stop reason, and usage cache", () => {
     const out = translateResponse({
       id: "r1",

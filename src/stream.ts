@@ -44,7 +44,8 @@ export class StreamTranslator {
       events.push(this.messageStart(chunk.model || this.model))
     }
 
-    if (delta?.content) {
+    const text = (delta?.content ?? "") + (delta?.refusal ?? "")
+    if (text) {
       // Tool blocks must all close before a text block starts (Anthropic
       // blocks are strictly sequential).
       this.closeOpenTools(events)
@@ -65,7 +66,7 @@ export class StreamTranslator {
         data: {
           type: "content_block_delta",
           index: this.textIndex,
-          delta: { type: "text_delta", text: delta.content },
+          delta: { type: "text_delta", text },
         },
       })
     }

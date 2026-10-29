@@ -6,7 +6,7 @@
 
 import { effortFor, normalizeModel } from "./translate"
 import type { AnthropicRequest, OpenAIResponse } from "./wire"
-import { classifyContent } from "./blocks"
+import { classifyContent, imageUrl } from "./blocks"
 
 // ---------------------------------------------------------------------------
 // Request direction: Anthropic -> Responses
@@ -75,7 +75,7 @@ export function toResponsesRequest(
             else if (child.kind === "image")
               images.push({
                 type: "input_image",
-                image_url: `data:${child.block.source.media_type};base64,${child.block.source.data}`,
+                image_url: imageUrl(child.block),
               })
           }
           text = texts.join("\n\n")
@@ -105,7 +105,7 @@ export function toResponsesRequest(
         const block = view.block
         rest.push({
           type: "input_image",
-          image_url: `data:${block.source.media_type};base64,${block.source.data}`,
+          image_url: imageUrl(block),
         })
       } else if (view.kind === "tool_use") {
         const block = view.block
@@ -199,7 +199,8 @@ export class ResponsesEventAdapter {
   private toolIndexes = new Map<string, number>()
   private argsAccum = new Map<string, string>()
   private argsRescued = new Set<string>()
-  private textAccum = new Map<string, string>()
+  private textItems = new Set<string>()
+  private textDeltas = new Set<string>()
   private textRescued = new Set<string>()
   private lastToolKey: string | null = null
   private lastTextKey: string | null = null
@@ -235,7 +236,7 @@ export class ResponsesEventAdapter {
     itemId: string,
     event?: Record<string, unknown>,
   ): string {
-    if (this.textAccum.has(itemId) || this.lastTextKey === null)
+    if (this.textItems.has(itemId) || this.lastTextKey === null)
       return itemId
     this.fallbacks++
     this.noteLoss(
@@ -263,14 +264,17 @@ export class ResponsesEventAdapter {
 
   /** Convert one Responses stream event into OpenAI-chunk shape (or null). */
   pushEvent(event: Record<string, unknown>): OpenAIResponse | null {
-    const type = event.type as string | undefined
-    if (!type) return null
+    const type = event.type
+    if (typeof type !== "string") return null
 
-    if (type === "response.output_text.delta") {
+    const refusal = type.startsWith("response.refusal.")
+    if (type === "response.output_text.delta" || type === "response.refusal.delta") {
       const delta = event.delta as string | undefined
       if (!delta) return null
       const key = this.textKeyFor(String(event.item_id ?? "r"))
-      this.textAccum.set(key, (this.textAccum.get(key) ?? "") + delta)
+      const partKey = `${key}:${event.content_index ?? 0}:${refusal ? "refusal" : "text"}`
+      this.textItems.add(key)
+      this.textDeltas.add(partKey)
       this.lastTextKey = key
       return {
         id: key,
@@ -279,13 +283,14 @@ export class ResponsesEventAdapter {
       }
     }
 
-    if (type === "response.output_text.done") {
+    if (type === "response.output_text.done" || type === "response.refusal.done") {
       // Authoritative fallback: if no delta arrived for this item, emit the
       // full text so a lost stream cannot silently become an empty message.
       const key = this.textKeyFor(String(event.item_id ?? "r"), event)
-      const full = (event.text as string | undefined) ?? ""
-      if (full && !(this.textRescued.has(key) || this.textAccum.get(key))) {
-        this.textRescued.add(key)
+      const partKey = `${key}:${event.content_index ?? 0}:${refusal ? "refusal" : "text"}`
+      const full = ((refusal ? event.refusal : event.text) as string | undefined) ?? ""
+      if (full && !(this.textRescued.has(partKey) || this.textDeltas.has(partKey))) {
+        this.textRescued.add(partKey)
         return {
           id: key,
           model: "",
@@ -481,9 +486,10 @@ export function responsesToOpenAIResponse(
   }> = []
   for (const item of output) {
     if (item.type === "message") {
-      const content = (item.content as Array<{ type?: string; text?: string }> | undefined) ?? []
+      const content = (item.content as Array<{ type?: string; text?: string; refusal?: string }> | undefined) ?? []
       for (const part of content) {
         if (part.type === "output_text") text += part.text ?? ""
+        else if (part.type === "refusal") text += part.refusal ?? ""
       }
     } else if (item.type === "function_call") {
       toolCalls.push({

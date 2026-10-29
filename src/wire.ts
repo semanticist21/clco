@@ -100,10 +100,11 @@ export interface OpenAIUsage {
 export interface OpenAIChoice {
   index: number
   finish_reason: "stop" | "length" | "tool_calls" | "content_filter" | null
-  message?: { role: "assistant"; content: OpenAIContent; tool_calls?: OpenAIToolCall[] }
+  message?: { role: "assistant"; content: OpenAIContent; refusal?: string | null; tool_calls?: OpenAIToolCall[] }
   delta?: {
     role?: string
     content?: string | null
+    refusal?: string | null
     tool_calls?: Array<{
       index: number
       id?: string

@@ -2,7 +2,8 @@
 // (GPT-5.x "luna" family) must work transparently, both streaming and not.
 
 import { describe, expect, test } from "bun:test"
-import { setModelAliases } from "../src/translate"
+import { setModelAliases, translateResponse } from "../src/translate"
+import { StreamTranslator } from "../src/stream"
 import type { AnthropicRequest } from "../src/wire"
 import {
   toResponsesRequest,
@@ -11,6 +12,20 @@ import {
 } from "../src/responses"
 
 describe("toResponsesRequest", () => {
+  test.each([false, true])("preserves URL images with tool_result=%s", (toolResult) => {
+    const image = { type: "image" as const, source: { type: "url" as const, url: "https://example.com/image.png" } }
+    const out = toResponsesRequest({
+      model: "m", max_tokens: 1,
+      messages: [{ role: "user", content: toolResult
+        ? [{ type: "tool_result", tool_use_id: "t1", content: [image] }]
+        : [image] }],
+    })
+    expect(out.input.at(-1)?.content).toEqual([
+      { type: "input_image", image_url: image.source.url },
+    ])
+    if (toolResult) expect(out.input[0]).toMatchObject({ type: "function_call_output", call_id: "t1" })
+  })
+
   test("drops Claude's built-in server tools and degrades a pinned choice", () => {
     const req = toResponsesRequest({
       model: "gpt-5.6-sol",
@@ -99,6 +114,48 @@ describe("toResponsesRequest", () => {
 })
 
 describe("ResponsesEventAdapter", () => {
+  test.each([false, true])("preserves refusal parts exactly once with deltas=%s", (deltas) => {
+    const adapter = new ResponsesEventAdapter()
+    const translator = new StreamTranslator("m")
+    const events: Array<Record<string, unknown>> = [
+      { type: "response.output_item.added", item: { type: "message", id: "msg_1" } },
+      ...(deltas ? [
+        { type: "response.output_text.delta", item_id: "msg_1", content_index: 0, delta: "Notice: " },
+        { type: "response.refusal.delta", item_id: "msg_1", content_index: 1, delta: "I cannot " },
+        { type: "response.refusal.delta", item_id: "msg_1", content_index: 1, delta: "help with that request." },
+      ] : []),
+      { type: "response.output_text.done", item_id: "msg_1", content_index: 0, text: "Notice: " },
+      { type: "response.output_text.done", item_id: "msg_1", content_index: 0, text: "Notice: " },
+      { type: "response.refusal.done", item_id: "msg_1", content_index: 1, refusal: "I cannot help with that request." },
+      { type: "response.refusal.done", item_id: "msg_1", content_index: 1, refusal: "I cannot help with that request." },
+      { type: "response.completed", response: { usage: { input_tokens: 5, output_tokens: 8 } } },
+    ]
+    const translated = events.flatMap((event) => {
+      const chunk = adapter.pushEvent(event)
+      return chunk ? translator.pushChunk(chunk) : []
+    })
+    translated.push(...translator.finish())
+    expect(translated.filter((e) => e.event === "content_block_delta")
+      .map((e) => (e.data.delta as { text: string }).text).join(""))
+      .toBe("Notice: I cannot help with that request.")
+    expect(translated.find((e) => e.event === "message_delta")?.data.delta)
+      .toEqual({ stop_reason: "end_turn", stop_sequence: null })
+    expect(adapter.lossSummary()).toBeNull()
+  })
+
+  test("preserves non-streaming refusal parts", () => {
+    const out = translateResponse(responsesToOpenAIResponse({
+      id: "r", model: "m", status: "completed", output: [{
+        type: "message", content: [
+          { type: "output_text", text: "Notice: " },
+          { type: "refusal", refusal: "I cannot help with that request." },
+        ],
+      }],
+    }))
+    expect(out.content).toEqual([{ type: "text", text: "Notice: I cannot help with that request." }])
+    expect(out.stop_reason).toBe("end_turn")
+  })
+
   test.each(["content_filter", "max_messages", "steered"])("incomplete cause %s is explicit, not token exhaustion", (reason) => {
     const response = { status: "incomplete", incomplete_details: { reason } }
     const adapter = new ResponsesEventAdapter()
@@ -118,6 +175,7 @@ describe("ResponsesEventAdapter", () => {
   test("maps text deltas, tool calls, usage, and failures to OpenAI chunks", () => {
     const adapter = new ResponsesEventAdapter()
     expect(adapter.pushEvent({ type: "response.created" })).toBeNull()
+    expect(adapter.pushEvent({ type: 1 })).toBeNull()
 
     const text = adapter.pushEvent({ type: "response.output_text.delta", delta: "He" })!
     expect(text!.choices?.[0]?.delta).toEqual({ content: "He" })
