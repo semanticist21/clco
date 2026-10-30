@@ -501,7 +501,40 @@ async function handleMessages(
       headers["cache-control"] = "no-cache"
       headers["x-accel-buffering"] = "no"
     }
-    return new Response(res.body, { status: res.status, headers })
+    if (!stream) {
+      try {
+        return new Response(await res.arrayBuffer(), { status: res.status, headers })
+      } catch (err) {
+        const message = `upstream response interrupted: ${String(err)}`
+        logLine(`[${timestamp()}]   -> ${message}`)
+        return anthropicError(502, message)
+      }
+    }
+    // Bun prints unhandled response-body errors over Claude's TUI even when request logs are off.
+    const reader = res.body!.getReader()
+    let cancelled = false
+    const body = new ReadableStream<Uint8Array>({
+      async pull(controller) {
+        try {
+          const { done, value } = await reader.read()
+          if (cancelled) return
+          if (done) controller.close()
+          else controller.enqueue(value)
+        } catch (err) {
+          if (cancelled || req.signal.aborted) return
+          const message = `upstream response interrupted: ${String(err)}`
+          logLine(`[${timestamp()}]   -> ${message}`)
+          const error = { type: "error", error: { type: "api_error", message } }
+          controller.enqueue(new TextEncoder().encode(`\n\nevent: error\ndata: ${JSON.stringify(error)}\n\n`))
+          controller.close()
+        }
+      },
+      cancel() {
+        cancelled = true
+        return reader.cancel().catch(() => {})
+      },
+    })
+    return new Response(body, { status: res.status, headers })
   }
 
   if (!stream) {

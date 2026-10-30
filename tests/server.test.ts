@@ -920,6 +920,67 @@ describe("auth retry across dialect fallbacks", () => {
   })
 })
 
+describe("native upstream disconnection", () => {
+  test.each([true, false])("a dropped body becomes an API error without terminal output (stream=%s)", async (stream) => {
+    const mock = createServer((req, res) => {
+      req.resume()
+      if (req.url === "/models") {
+        res.setHeader("content-type", "application/json")
+        res.end(JSON.stringify({ data: [{ id: "mock-native", supported_endpoints: ["/v1/messages"] }] }))
+        return
+      }
+      res.writeHead(200, { "content-type": stream ? "text/event-stream" : "application/json" })
+      res.write(stream ? 'event: ping\ndata: {"type":"ping"}\n\n' : '{"content":')
+      setTimeout(() => res.destroy(), 25)
+    })
+    await new Promise<void>((resolve) => mock.listen(0, "127.0.0.1", resolve))
+    const base = `http://127.0.0.1:${(mock.address() as AddressInfo).port}`
+    // Bun's native response-body errors bypass console.error, so inspect a subprocess's stderr.
+    const proc = Bun.spawn([process.execPath, "--eval", `
+      import { startServer, setAdapterLogSink } from ${JSON.stringify(new URL("../src/server.ts", import.meta.url).href)};
+      import { discoverModels } from ${JSON.stringify(new URL("../src/token.ts", import.meta.url).href)};
+      setAdapterLogSink(null);
+      await discoverModels();
+      const server = await startServer({ upstream: ${JSON.stringify(base)} });
+      try {
+        const response = await fetch(server.url + "/v1/messages", {
+          method: "POST", headers: { authorization: "Bearer clco-local", "content-type": "application/json" },
+          body: JSON.stringify({ model: "mock-native", stream: ${stream}, max_tokens: 32, messages: [{ role: "user", content: "hi" }] }),
+        });
+        const body = await response.text();
+        const health = await fetch(server.url + "/api/hello", { headers: { authorization: "Bearer clco-local" } });
+        console.log(JSON.stringify({ status: response.status, body, health: health.status }));
+      } finally { server.stop(); }
+    `], {
+      env: { ...process.env, CLCO_UPSTREAM: base, CLCO_DEBUG: "", CLCO_NO_PASSTHROUGH: "" },
+      stdout: "pipe", stderr: "pipe",
+    })
+    try {
+      const [stdout, stderr, code] = await Promise.all([
+        new Response(proc.stdout).text(), new Response(proc.stderr).text(), proc.exited,
+      ])
+      expect(code).toBe(0)
+      expect(stderr).toBe("")
+      const result = JSON.parse(stdout)
+      expect(result.health).toBe(200)
+      expect(result.status).toBe(stream ? 200 : 502)
+      if (stream) {
+        const events = parseEvents(result.body)
+        expect(events[0]?.name).toBe("ping")
+        expect(events.at(-1)?.name).toBe("error")
+        expect(events.at(-1)?.data.error).toMatchObject({ type: "api_error" })
+        expect(events.some((event) => event.name === "message_stop")).toBe(false)
+      } else {
+        expect(JSON.parse(result.body)).toMatchObject({ type: "error", error: { type: "api_error" } })
+      }
+    } finally {
+      proc.kill()
+      mock.closeAllConnections()
+      await new Promise<void>((resolve) => mock.close(() => resolve()))
+    }
+  })
+})
+
 describe("client cancellation", () => {
   for (const [dialect, model, path] of [
     ["native", "mock-native", "/v1/messages"],
