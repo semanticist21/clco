@@ -1,6 +1,8 @@
 // Short-lived Copilot token management (exchange + cache + refresh) and
 // Copilot model discovery.
 
+import { homedir } from "node:os"
+import { join } from "node:path"
 import {
   GITHUB_API_BASE_URL,
   copilotBaseUrl,
@@ -12,6 +14,7 @@ import {
 } from "./api"
 import { ensureGithubToken } from "./auth"
 import { advertisedId } from "./catalog"
+import { configDir } from "./config"
 import { isTlsTrustError } from "./tls"
 import { setModelAliases } from "./translate"
 
@@ -20,6 +23,47 @@ export interface ModelMapping {
   sonnet: string
   haiku: string
   fable: string
+}
+
+// Last slugs Copilot actually served, so a transient discovery failure falls
+// back to models the account really has instead of slugs pinned to this clco
+// release (which age out of the upstream within months — the old 4.1 pin was
+// already dead). Same pattern as catalog.json: written on success, read on
+// failure, and a missing/unreadable cache keeps the built-in guesses working.
+const SLOTS_CACHE = "models.json"
+
+export async function saveSlotCache(slots: ModelMapping): Promise<void> {
+  try {
+    const { mkdir, writeFile } = await import("node:fs/promises")
+    const dir = configDir() ?? join(homedir(), ".config", "clco")
+    await mkdir(dir, { recursive: true, mode: 0o700 }).catch(() => {})
+    await writeFile(
+      join(dir, SLOTS_CACHE),
+      JSON.stringify(slots, null, 2) + "\n",
+    ).catch(() => {})
+  } catch {
+    // a failed cache write must never fail the launch
+  }
+}
+
+export async function loadSlotCache(): Promise<ModelMapping | null> {
+  try {
+    const { readFile } = await import("node:fs/promises")
+    const dir = configDir() ?? join(homedir(), ".config", "clco")
+    const raw = await readFile(join(dir, SLOTS_CACHE), "utf8")
+    const slots = JSON.parse(raw) as Partial<ModelMapping>
+    if (
+      typeof slots.opus === "string" &&
+      typeof slots.sonnet === "string" &&
+      typeof slots.haiku === "string" &&
+      typeof slots.fable === "string"
+    ) {
+      return slots as ModelMapping
+    }
+    return null
+  } catch {
+    return null
+  }
 }
 
 interface CopilotTokenResponse {
@@ -270,12 +314,16 @@ export async function discoverModels(): Promise<ModelMapping> {
         sonnet ??
         FALLBACK_MODELS.fable
       if (sonnet) {
-        return {
+        const slots: ModelMapping = {
           opus: opus ?? FALLBACK_MODELS.opus,
           sonnet,
           haiku: haiku ?? FALLBACK_MODELS.haiku,
           fable,
         }
+        // Remember what this account really serves, so a future transient
+        // discovery failure falls back to these instead of release-pinned slugs.
+        if (!isMockMode()) await saveSlotCache(slots)
+        return slots
       }
       // The list arrived and simply has no Claude models in it - a fact about
       // this plan, not about the network. Falling through to the generic
@@ -297,10 +345,14 @@ export async function discoverModels(): Promise<ModelMapping> {
       ` slots are guesses (override with CLCO_OPUS/SONNET/HAIKU)`
     : `[clco] Copilot /models discovery failed (${copilotBaseUrl()}${reason ? `: ${reason}` : ""})` +
       ` - falling back to default slugs (override with CLCO_OPUS/SONNET/HAIKU)`
+  // The last successful discovery beats release-pinned guesses: those age out
+  // of the upstream (the old "claude-opus-4.1" pin was already unserved), so
+  // a launch after a transient failure would pin a model the account rejects.
+  const cached = overrides.opus || overrides.sonnet ? null : await loadSlotCache()
   return {
-    opus: overrides.opus ?? FALLBACK_MODELS.opus,
-    sonnet: overrides.sonnet ?? FALLBACK_MODELS.sonnet,
-    haiku: overrides.haiku ?? FALLBACK_MODELS.haiku,
-    fable: overrides.fable ?? FALLBACK_MODELS.fable,
+    opus: overrides.opus ?? cached?.opus ?? FALLBACK_MODELS.opus,
+    sonnet: overrides.sonnet ?? cached?.sonnet ?? FALLBACK_MODELS.sonnet,
+    haiku: overrides.haiku ?? cached?.haiku ?? FALLBACK_MODELS.haiku,
+    fable: overrides.fable ?? cached?.fable ?? FALLBACK_MODELS.fable,
   }
 }

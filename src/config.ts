@@ -20,14 +20,19 @@ export interface AuthStore {
 
 // Overridable so tests can exercise the real read/merge/write path without
 // writing into the user's live install.
-let configDir: string | null = null
+let scopedDir: string | null = null
 
 export function setConfigDir(dir: string | null): void {
-  configDir = dir
+  scopedDir = dir
+}
+
+/** The effective config directory (tests may scope it). */
+export function configDir(): string {
+  return scopedDir ?? join(homedir(), ".config", "clco")
 }
 
 function authDir(): string {
-  return configDir ?? join(homedir(), ".config", "clco")
+  return configDir()
 }
 
 function authPath(): string {
